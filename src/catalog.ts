@@ -1,6 +1,7 @@
 import { lstat, open, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
+import { LANGUAGE_NAMES } from './labels.js';
 import { tokenize } from './text.js';
 
 const SKILL_FILE = 'SKILL.md';
@@ -16,6 +17,8 @@ export const MAX_CONTENT_CHARS = 200_000;
 const MAX_CONTENT_BYTES = MAX_CONTENT_CHARS * 4;
 const MAX_LISTED_FILES = 200;
 const SCAN_BATCH = 64;
+/** Number of tags returned by facets, most frequent first. */
+const TAG_FACET_LIMIT = 60;
 
 export interface SkillMeta {
   /** Relative folder path, e.g. "de/administrative/skills/01-zulaessigkeit-verwaltungsklage". */
@@ -29,6 +32,8 @@ export interface SkillMeta {
   license: string;
   author: string;
   version: string;
+  /** Lowercase tags, such as "drafting", "litigation" or "analysis". */
+  tags: string[];
 }
 
 export interface IndexedSkill {
@@ -55,6 +60,31 @@ export interface SkillDocument {
   content: string;
   truncated: boolean;
   files: string[];
+}
+
+export interface FacetFilters {
+  jurisdiction?: string;
+  language?: string;
+  practice?: string;
+  tag?: string;
+}
+
+export interface Facet {
+  code: string;
+  count: number;
+  /** Display name, when one is known (languages only). */
+  label?: string;
+}
+
+export interface Facets {
+  /** Number of skills matching the filters. */
+  total: number;
+  languages: Facet[];
+  jurisdictions: Facet[];
+  /** Practice areas, which are the themes. */
+  practices: Facet[];
+  /** Tags, which give the task type or topic. Only part of the library is tagged. */
+  tags: Facet[];
 }
 
 /**
@@ -108,6 +138,23 @@ export async function loadCatalog(root: string): Promise<Catalog> {
   };
 }
 
+/** True when a skill matches every filter that is set. */
+export function matchesFilters(meta: SkillMeta, filters: FacetFilters): boolean {
+  if (filters.jurisdiction && meta.jurisdiction !== filters.jurisdiction) {
+    return false;
+  }
+  if (filters.language && meta.language !== filters.language) {
+    return false;
+  }
+  if (filters.practice && meta.practice !== filters.practice) {
+    return false;
+  }
+  if (filters.tag && !meta.tags.includes(filters.tag)) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Reads one skill document, looked up by its id. The id is never used as a path.
  * The file is checked again at read time, because it may have been replaced by a
@@ -139,34 +186,48 @@ export async function readSkill(catalog: Catalog, id: string): Promise<SkillDocu
   };
 }
 
-export interface Facet {
-  code: string;
-  count: number;
-}
-
-export interface Facets {
-  jurisdictions: Facet[];
-  practices: Facet[];
-}
-
-/** Counts skills per jurisdiction, and per practice area when a jurisdiction is given. */
-export function facets(catalog: Catalog, jurisdiction?: string): Facets {
-  const jurisdictionCounts = new Map<string, number>();
-  const practiceCounts = new Map<string, number>();
+/**
+ * Counts skills per language, jurisdiction, practice area (theme) and tag (task type).
+ * Counts only include the skills matching the filters, so browsing narrows step by step.
+ */
+export function facets(catalog: Catalog, filters: FacetFilters = {}): Facets {
+  const languages = new Map<string, number>();
+  const jurisdictions = new Map<string, number>();
+  const practices = new Map<string, number>();
+  const tags = new Map<string, number>();
+  let total = 0;
 
   for (const { meta } of catalog.skills.values()) {
-    if (meta.jurisdiction) {
-      jurisdictionCounts.set(meta.jurisdiction, (jurisdictionCounts.get(meta.jurisdiction) ?? 0) + 1);
+    if (!matchesFilters(meta, filters)) {
+      continue;
     }
-    if (jurisdiction && meta.jurisdiction === jurisdiction && meta.practice) {
-      practiceCounts.set(meta.practice, (practiceCounts.get(meta.practice) ?? 0) + 1);
+    total += 1;
+    increment(languages, meta.language);
+    increment(jurisdictions, meta.jurisdiction);
+    increment(practices, meta.practice);
+    for (const tag of meta.tags) {
+      increment(tags, tag);
     }
   }
 
   return {
-    jurisdictions: toFacets(jurisdictionCounts),
-    practices: toFacets(practiceCounts),
+    total,
+    languages: toFacets(languages).map(withLanguageName),
+    jurisdictions: toFacets(jurisdictions),
+    practices: toFacets(practices),
+    tags: toFacets(tags).slice(0, TAG_FACET_LIMIT),
   };
+}
+
+function increment(counts: Map<string, number>, code: string): void {
+  if (code) {
+    counts.set(code, (counts.get(code) ?? 0) + 1);
+  }
+}
+
+function withLanguageName(facet: Facet): Facet {
+  const label = LANGUAGE_NAMES[facet.code];
+  return label ? { ...facet, label } : facet;
 }
 
 function toFacets(counts: Map<string, number>): Facet[] {
@@ -239,6 +300,7 @@ async function indexSkill(root: string, filePath: string): Promise<IndexedSkill 
     return null;
   }
 
+  const tags = [...new Set(asList(data.tags).map((tag) => tag.toLowerCase()))];
   const meta: SkillMeta = {
     id: path.relative(root, path.dirname(filePath)).split(path.sep).join('/'),
     name,
@@ -250,8 +312,8 @@ async function indexSkill(root: string, filePath: string): Promise<IndexedSkill 
     license: asText(data.license),
     author: asText(data.author),
     version: asText(data.version),
+    tags,
   };
-  const tags = asList(data.tags).join(' ');
 
   const weights = new Map<string, number>();
   let length = 0;
@@ -263,7 +325,7 @@ async function indexSkill(root: string, filePath: string): Promise<IndexedSkill 
   };
   add(meta.title, 3);
   add(meta.name, 2);
-  add(tags, 2);
+  add(tags.join(' '), 2);
   add(meta.description, 2);
   add(body.slice(0, BODY_CHARS), 1);
 

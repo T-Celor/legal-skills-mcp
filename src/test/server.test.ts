@@ -14,6 +14,10 @@ function textBlocks(result: unknown): TextBlock[] {
   return (result as { content: TextBlock[] }).content;
 }
 
+function firstJson<T>(result: unknown): T {
+  return JSON.parse(textBlocks(result)[0]?.text ?? '{}') as T;
+}
+
 describe('MCP server over the protocol', () => {
   let fixture: FixtureLibrary;
   let client: Client;
@@ -51,12 +55,19 @@ describe('MCP server over the protocol', () => {
       name: 'search_legal_skills',
       arguments: { query: 'NDA confidentialité' },
     });
-    const payload = JSON.parse(textBlocks(result)[0]?.text ?? '{}') as {
-      disclaimer: string;
-      results: Array<{ id: string }>;
-    };
+    const payload = firstJson<{ disclaimer: string; results: Array<{ id: string }> }>(result);
     assert.equal(payload.disclaimer, DISCLAIMER);
     assert.equal(payload.results[0]?.id, 'fr/contracts/skills/revue-nda');
+  });
+
+  it('finds a complaint letter from a French query, and filters by tag', async () => {
+    const result = await client.callTool({
+      name: 'search_legal_skills',
+      arguments: { query: 'réclamation', tag: 'letter' },
+    });
+    const payload = firstJson<{ results: Array<{ id: string; tags: string[] }> }>(result);
+    assert.equal(payload.results[0]?.id, 'general/consumer/skills/complaint-letter');
+    assert.ok(payload.results.every((hit) => hit.tags.includes('letter')));
   });
 
   it('returns the full skill text as a second block', async () => {
@@ -95,18 +106,29 @@ describe('MCP server over the protocol', () => {
     assert.equal(outcome, 'error');
   });
 
-  it('lists facets with counts', async () => {
+  it('lists practice areas for a jurisdiction', async () => {
     const result = await client.callTool({
       name: 'list_legal_facets',
       arguments: { jurisdiction: 'de' },
     });
-    const payload = JSON.parse(textBlocks(result)[0]?.text ?? '{}') as {
-      practices: Array<{ code: string; count: number }>;
-    };
+    const payload = firstJson<{ practices: Array<{ code: string; count: number }> }>(result);
     assert.deepEqual(payload.practices, [
       { code: 'employment', count: 1 },
       { code: 'general', count: 1 },
     ]);
+  });
+
+  it('browses facets step by step, starting from a language', async () => {
+    const result = await client.callTool({
+      name: 'list_legal_facets',
+      arguments: { language: 'fr' },
+    });
+    const payload = firstJson<{
+      total: number;
+      jurisdictions: Array<{ code: string; count: number }>;
+    }>(result);
+    assert.equal(payload.total, 3);
+    assert.deepEqual(payload.jurisdictions, [{ code: 'fr', count: 3 }]);
   });
 
   it('strips invisible tag characters from returned text', async () => {
@@ -114,9 +136,7 @@ describe('MCP server over the protocol', () => {
       name: 'search_legal_skills',
       arguments: { query: 'invisibles' },
     });
-    const payload = JSON.parse(textBlocks(result)[0]?.text ?? '{}') as {
-      results: Array<{ id: string; description: string }>;
-    };
+    const payload = firstJson<{ results: Array<{ id: string; description: string }> }>(result);
     assert.equal(payload.results[0]?.id, 'fr/contracts/skills/tag-chars');
     assert.equal(payload.results[0]?.description.includes(String.fromCodePoint(0xe0041)), false);
   });

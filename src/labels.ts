@@ -1,0 +1,23 @@
+/** Display names for the language codes used in legal-skills-open frontmatter. */
+export const LANGUAGE_NAMES: Record<string, string> = {
+  ar: 'العربية',
+  cs: 'Čeština',
+  de: 'Deutsch',
+  en: 'English',
+  es: 'Español',
+  fi: 'Suomi',
+  fr: 'Français',
+  he: 'עברית',
+  it: 'Italiano',
+  ja: '日本語',
+  ko: '한국어',
+  pl: 'Polski',
+  pt: 'Português',
+  ro: 'Română',
+  ru: 'Русский',
+  th: 'ไทย',
+  tr: 'Türkçe',
+  uk: 'Українська',
+  vi: 'Tiếng Việt',
+  zh: '中文',
+};

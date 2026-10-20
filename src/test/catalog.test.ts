@@ -27,6 +27,7 @@ describe('loadCatalog', () => {
       'fr/contracts/skills/crlf-bom',
       'fr/contracts/skills/revue-nda',
       'fr/contracts/skills/tag-chars',
+      'general/consumer/skills/complaint-letter',
       'us/general/skills/huge-skill',
       'us/general/skills/no-jurisdiction',
       'us/litigation/skills/motion-to-dismiss',
@@ -43,7 +44,7 @@ describe('loadCatalog', () => {
     assert.equal([...catalog.skills.keys()].some((id) => id.includes('leak')), false);
   });
 
-  it('reads frontmatter metadata', () => {
+  it('reads frontmatter metadata, including tags', () => {
     const meta = catalog.skills.get('fr/contracts/skills/revue-nda')?.meta;
     assert.ok(meta);
     assert.equal(meta.title, 'Revue de NDA');
@@ -52,6 +53,7 @@ describe('loadCatalog', () => {
     assert.equal(meta.language, 'fr');
     assert.equal(meta.license, 'Apache-2.0');
     assert.equal(meta.version, '0.1.0');
+    assert.deepEqual(meta.tags, ['drafting', 'nda']);
   });
 
   it('keeps version strings as written, including CRLF files with a byte order mark', () => {
@@ -92,16 +94,49 @@ describe('loadCatalog', () => {
     assert.equal(await readSkill(catalog, 'linked/secret/skills/leak'), null);
   });
 
-  it('counts skills per jurisdiction and per practice area', () => {
+  it('counts skills per facet, and narrows the counts when filters are given', () => {
     const all = facets(catalog);
+    assert.equal(all.total, 10);
     assert.deepEqual(all.jurisdictions, [
       { code: 'fr', count: 3 },
       { code: 'de', count: 2 },
       { code: 'us', count: 2 },
       { code: 'cn', count: 1 },
+      { code: 'general', count: 1 },
     ]);
-    assert.deepEqual(all.practices, []);
-    assert.deepEqual(facets(catalog, 'fr').practices, [{ code: 'contracts', count: 3 }]);
+    assert.deepEqual(
+      all.languages.map((facet) => [facet.code, facet.count]),
+      [
+        ['en', 4],
+        ['fr', 3],
+        ['de', 2],
+        ['zh', 1],
+      ],
+    );
+    assert.equal(all.languages.find((facet) => facet.code === 'fr')?.label, 'Français');
+    assert.deepEqual(
+      all.practices.map((facet) => [facet.code, facet.count]),
+      [
+        ['contracts', 4],
+        ['general', 3],
+        ['consumer', 1],
+        ['employment', 1],
+        ['litigation', 1],
+      ],
+    );
+    assert.deepEqual(all.tags.slice(0, 2), [
+      { code: 'drafting', count: 2 },
+      { code: 'letter', count: 1 },
+    ]);
+
+    const french = facets(catalog, { language: 'fr' });
+    assert.equal(french.total, 3);
+    assert.deepEqual(french.jurisdictions, [{ code: 'fr', count: 3 }]);
+    assert.deepEqual(french.practices, [{ code: 'contracts', count: 3 }]);
+    assert.deepEqual(french.tags, [
+      { code: 'drafting', count: 1 },
+      { code: 'nda', count: 1 },
+    ]);
   });
 });
 

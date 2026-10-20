@@ -42,6 +42,7 @@ const SKILLS: Record<string, string> = {
       jurisdiction: 'fr',
       practice: 'contracts',
       language: 'fr',
+      tags: '[drafting, nda]',
     },
     '# Revue de NDA\n\n## When to apply\nQuand un accord de confidentialité doit être relu.\n',
   ),
@@ -103,8 +104,25 @@ const SKILLS: Record<string, string> = {
       jurisdiction: 'us',
       practice: 'litigation',
       language: 'en',
+      tags: '[litigation, pleading]',
     },
     '# Motion to dismiss\n\nArguments under Rule 12 for dismissal of the complaint.\n',
+  ),
+  // A skill in English, under a general jurisdiction, for the cross-language search test.
+  'general/consumer/skills/complaint-letter': skillFile(
+    {
+      name: 'complaint-letter',
+      title: 'Complaint letter',
+      description: 'Drafts a formal complaint letter for a consumer dispute.',
+      author: 'Fixture Author',
+      license: 'MIT',
+      version: '0.1.0',
+      jurisdiction: 'general',
+      practice: 'consumer',
+      language: 'en',
+      tags: '[drafting, letter]',
+    },
+    '# Complaint letter\n',
   ),
   // An empty jurisdiction field parses as null.
   'us/general/skills/no-jurisdiction':

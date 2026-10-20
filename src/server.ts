@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { facets, loadCatalog, readSkill, type Catalog } from './catalog.js';
+import { facets, loadCatalog, readSkill, type Catalog, type Facet } from './catalog.js';
 import { searchCatalog } from './search.js';
 
-export const SERVER_VERSION = '0.1.0';
+export const SERVER_VERSION = '0.2.0';
 
 export const DISCLAIMER =
   'Informational reference material from a third-party open library, not legal advice. ' +
@@ -18,7 +18,22 @@ const UNTRUSTED_NOTICE =
 const jurisdictionSchema = z
   .string()
   .regex(/^[a-z][a-z-]{1,30}$/)
-  .describe('Lowercase jurisdiction code such as "fr", "de", "eu", "general", "cross-jurisdiction"');
+  .describe('Jurisdiction code in lowercase, such as "fr", "de", "eu", "general" or "cross-jurisdiction"');
+
+const languageSchema = z
+  .string()
+  .regex(/^[a-z]{2,3}(-[A-Za-z]{2,4})?$/)
+  .describe('Language code in lowercase, such as "en", "fr", "de", "zh"');
+
+const practiceSchema = z
+  .string()
+  .regex(/^[a-z][a-z-]{1,40}$/)
+  .describe('Practice area, which is the theme, such as "consumer", "employment", "data-protection", "contracts"');
+
+const tagSchema = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]{0,40}$/)
+  .describe('Tag, which gives the task type or topic, such as "drafting", "litigation", "analysis", "letter", "gdpr"');
 
 /**
  * Removes invisible Unicode tag characters (U+E0000 to U+E007F). They can hide
@@ -26,6 +41,10 @@ const jurisdictionSchema = z
  */
 function clean(text: string): string {
   return text.replace(/[\u{E0000}-\u{E007F}]/gu, '');
+}
+
+function cleanFacet(facet: Facet): Facet {
+  return { ...facet, code: clean(facet.code) };
 }
 
 /**
@@ -61,34 +80,28 @@ export function createServer(root: string): McpServer {
     {
       title: 'Search legal skills',
       description:
-        'Ranked keyword search over the legal-skills-open library (about 20,000 SKILL.md skills across ' +
-        '54 jurisdictions). Returns skill ids with titles and descriptions; call get_legal_skill to read one. ' +
-        'Results are reference material, not legal advice.',
+        'Ranked search over the legal-skills-open library (about 20,000 skills). Terms in French, English, German ' +
+        'and other languages are matched through a glossary of legal concepts, so "réclamation" also finds ' +
+        '"complaint" and "Beschwerde". Use list_legal_facets first to see the languages, themes (practice areas) ' +
+        'and tags. Results are reference material, not legal advice.',
       inputSchema: {
         query: z
           .string()
           .trim()
           .min(2)
           .max(300)
-          .describe('Keywords in any language, e.g. "GDPR processor contract" or "Kündigung Arbeitsvertrag"'),
+          .describe('Keywords in any language, e.g. "réclamation consommateur" or "GDPR processor contract"'),
         jurisdiction: jurisdictionSchema.optional(),
-        practice: z
-          .string()
-          .regex(/^[a-z][a-z-]{1,40}$/)
-          .optional()
-          .describe('Practice area such as "data-protection", "employment", "contracts", "litigation"'),
-        language: z
-          .string()
-          .regex(/^[a-z]{2,3}(-[A-Za-z]{2,4})?$/)
-          .optional()
-          .describe('Language code of the skill, e.g. "en", "fr", "de"'),
+        language: languageSchema.optional(),
+        practice: practiceSchema.optional(),
+        tag: tagSchema.optional(),
         limit: z.number().int().min(1).max(25).default(8),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ query, jurisdiction, practice, language, limit }) => {
+    async ({ query, jurisdiction, language, practice, tag, limit }) => {
       const catalog = await getCatalog();
-      const hits = searchCatalog(catalog, query, limit, { jurisdiction, practice, language });
+      const hits = searchCatalog(catalog, query, limit, { jurisdiction, language, practice, tag });
       return jsonResult({
         disclaimer: DISCLAIMER,
         untrusted_text_notice: UNTRUSTED_NOTICE,
@@ -98,9 +111,10 @@ export function createServer(root: string): McpServer {
           id: meta.id,
           title: clean(meta.title),
           description: clean(meta.description),
-          jurisdiction: meta.jurisdiction,
-          practice: meta.practice,
-          language: meta.language,
+          jurisdiction: clean(meta.jurisdiction),
+          practice: clean(meta.practice),
+          language: clean(meta.language),
+          tags: meta.tags.map(clean),
           license: clean(meta.license),
           score: Math.round(score * 1000) / 1000,
         })),
@@ -144,9 +158,10 @@ export function createServer(root: string): McpServer {
                 id: meta.id,
                 title: clean(meta.title),
                 description: clean(meta.description),
-                jurisdiction: meta.jurisdiction,
-                practice: meta.practice,
-                language: meta.language,
+                jurisdiction: clean(meta.jurisdiction),
+                practice: clean(meta.practice),
+                language: clean(meta.language),
+                tags: meta.tags.map(clean),
                 license: clean(meta.license),
                 author: clean(meta.author),
                 version: clean(meta.version),
@@ -173,17 +188,35 @@ export function createServer(root: string): McpServer {
   server.registerTool(
     'list_legal_facets',
     {
-      title: 'List jurisdictions and practice areas',
+      title: 'Browse languages, themes and tags',
       description:
-        'Counts skills per jurisdiction. Pass a jurisdiction to also count its practice areas. Use it to pick search filters.',
+        'Counts skills by language, jurisdiction, practice area (theme) and tag (task type or topic). Each count only ' +
+        'includes the skills matching the filters you pass, so you can browse step by step: first the languages, ' +
+        'then the themes and tags in one language. Tags cover only part of the library.',
       inputSchema: {
         jurisdiction: jurisdictionSchema.optional(),
+        language: languageSchema.optional(),
+        practice: practiceSchema.optional(),
+        tag: tagSchema.optional(),
       },
-      annotations: { readOnlyHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ jurisdiction }) => {
+    async ({ jurisdiction, language, practice, tag }) => {
       const catalog = await getCatalog();
-      return jsonResult({ jurisdiction: jurisdiction ?? null, ...facets(catalog, jurisdiction) });
+      const result = facets(catalog, { jurisdiction, language, practice, tag });
+      return jsonResult({
+        filters: {
+          jurisdiction: jurisdiction ?? null,
+          language: language ?? null,
+          practice: practice ?? null,
+          tag: tag ?? null,
+        },
+        total: result.total,
+        languages: result.languages.map(cleanFacet),
+        jurisdictions: result.jurisdictions.map(cleanFacet),
+        practices: result.practices.map(cleanFacet),
+        tags: result.tags.map(cleanFacet),
+      });
     },
   );
 

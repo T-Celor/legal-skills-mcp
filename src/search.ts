@@ -1,15 +1,11 @@
-import type { Catalog, SkillMeta } from './catalog.js';
-import { tokenize } from './text.js';
+import { matchesFilters, type Catalog, type FacetFilters, type SkillMeta } from './catalog.js';
+import { expandQuery } from './glossary.js';
 
 /** BM25 parameters. */
 const K1 = 1.2;
 const B = 0.75;
 
-export interface SearchFilters {
-  jurisdiction?: string;
-  practice?: string;
-  language?: string;
-}
+export type SearchFilters = FacetFilters;
 
 export interface SearchHit {
   meta: SkillMeta;
@@ -18,7 +14,8 @@ export interface SearchHit {
 
 /**
  * Ranks skills against a free-text query with BM25 over weighted terms.
- * A skill matches when at least one query term appears in it.
+ * Query terms are expanded with cross-language equivalents at half weight.
+ * A skill matches when at least one of the (expanded) terms appears in it.
  */
 export function searchCatalog(
   catalog: Catalog,
@@ -26,8 +23,8 @@ export function searchCatalog(
   limit: number,
   filters: SearchFilters = {},
 ): SearchHit[] {
-  const terms = [...new Set(tokenize(query))];
-  if (terms.length === 0) {
+  const weights = expandQuery(query);
+  if (weights.size === 0) {
     return [];
   }
 
@@ -35,19 +32,12 @@ export function searchCatalog(
   const hits: SearchHit[] = [];
 
   for (const skill of catalog.skills.values()) {
-    const { meta } = skill;
-    if (filters.jurisdiction && meta.jurisdiction !== filters.jurisdiction) {
-      continue;
-    }
-    if (filters.practice && meta.practice !== filters.practice) {
-      continue;
-    }
-    if (filters.language && meta.language !== filters.language) {
+    if (!matchesFilters(skill.meta, filters)) {
       continue;
     }
 
     let score = 0;
-    for (const term of terms) {
+    for (const [term, queryWeight] of weights) {
       const tf = skill.weights.get(term);
       if (!tf) {
         continue;
@@ -55,11 +45,11 @@ export function searchCatalog(
       const df = catalog.documentFrequency.get(term) ?? 1;
       const idf = Math.log(1 + (total - df + 0.5) / (df + 0.5));
       const norm = tf + K1 * (1 - B + (B * skill.length) / catalog.averageLength);
-      score += idf * ((tf * (K1 + 1)) / norm);
+      score += queryWeight * idf * ((tf * (K1 + 1)) / norm);
     }
 
     if (score > 0) {
-      hits.push({ meta, score });
+      hits.push({ meta: skill.meta, score });
     }
   }
 

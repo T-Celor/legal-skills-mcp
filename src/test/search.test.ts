@@ -43,6 +43,13 @@ describe('searchCatalog on the fixture library', () => {
     assert.equal(searchCatalog(catalog, '保密协议', 5)[0]?.meta.id, 'cn/contracts/skills/baomi-xieyi');
   });
 
+  it('finds an English complaint letter from French and German terms', () => {
+    const french = searchCatalog(catalog, 'réclamation consommateur', 5);
+    assert.equal(french[0]?.meta.id, 'general/consumer/skills/complaint-letter');
+    const german = searchCatalog(catalog, 'Beschwerde Verbraucher', 5);
+    assert.equal(german[0]?.meta.id, 'general/consumer/skills/complaint-letter');
+  });
+
   it('finds skills by words that only appear in the body', () => {
     const hits = searchCatalog(catalog, 'Rule 12 complaint', 5);
     assert.equal(hits[0]?.meta.id, 'us/litigation/skills/motion-to-dismiss');
@@ -52,6 +59,15 @@ describe('searchCatalog on the fixture library', () => {
     assert.deepEqual(searchCatalog(catalog, 'Kündigung', 5, { jurisdiction: 'fr' }), []);
     const german = searchCatalog(catalog, 'Kündigung', 5, { jurisdiction: 'de' });
     assert.equal(german.length, 1);
+  });
+
+  it('filters by tag', () => {
+    const drafting = searchCatalog(catalog, 'confidentialité', 5, { tag: 'drafting' });
+    assert.deepEqual(
+      drafting.map((hit) => hit.meta.id),
+      ['fr/contracts/skills/revue-nda'],
+    );
+    assert.deepEqual(searchCatalog(catalog, 'confidentialité', 5, { tag: 'litigation' }), []);
   });
 
   it('respects the result limit', () => {

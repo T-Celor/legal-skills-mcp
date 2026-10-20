@@ -1,6 +1,6 @@
 {
   "name": "legal-skills-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server that searches the ThomasMoreAI legal-skills-open library (SKILL.md files).",
   "private": true,
   "type": "module",
