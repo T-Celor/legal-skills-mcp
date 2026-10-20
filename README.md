@@ -1,42 +1,146 @@
 # legal-skills-mcp
 
-Une présentation du projet, avec les résultats mesurés, est disponible dans [presentation/README.md](presentation/README.md).
+An MCP server that lets an AI assistant search open legal skills by keyword, by meaning, or both.
 
-Serveur MCP qui permet à un assistant comme Claude de chercher dans la bibliothèque [legal-skills-open](https://github.com/ThomasMoreAI/legal-skills-open). Elle contient environ 20 000 compétences juridiques au format `SKILL.md`, réparties entre une cinquantaine de pays et de juridictions.
+[![GitHub stars](https://img.shields.io/github/stars/T-Celor/legal-skills-mcp?style=social)](https://github.com/T-Celor/legal-skills-mcp/stargazers)
+[![License](https://img.shields.io/github/license/T-Celor/legal-skills-mcp)](LICENSE)
+[![Node.js >= 22](https://img.shields.io/badge/Node.js-%3E%3D_22-brightgreen?logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![MCP over stdio](https://img.shields.io/badge/MCP-stdio-blue)](https://modelcontextprotocol.io)
 
-Le serveur retrouve les modèles, les procédures et les listes de contrôle déjà rédigés, pour que l'assistant s'y appuie. Il ne rédige pas à la place de l'utilisateur.
+legal-skills-mcp connects an assistant such as Claude to [legal-skills-open](https://github.com/ThomasMoreAI/legal-skills-open), a library of 20,293 legal skills in `SKILL.md` format, so that the assistant can work from the templates, procedures and checklists that already exist for a task.
 
-## Ce que le serveur propose
+> [!WARNING]
+> Disclaimer: results are not legal advice. The skills are written by third parties, and this project does not guarantee their legal quality. Check each point against official sources, and consult a lawyer for any important matter.
 
-Le serveur expose trois outils, tous en lecture seule :
+## Table of contents
 
-- `search_legal_skills` cherche des compétences par mots-clés, par sens ou les deux. Il accepte des filtres par pays, langue, domaine et tag.
-- `get_legal_skill` renvoie le texte complet d'une compétence et la liste de ses fichiers annexes.
-- `list_legal_facets` compte les compétences par langue, pays, domaine et tag. Il sert à parcourir la bibliothèque avant de chercher.
+- [Overview](#overview)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Search modes](#search-modes)
+- [Skills](#skills)
+- [The library at a glance](#the-library-at-a-glance)
+- [Quick start](#quick-start)
+- [Usage](#usage)
+- [Results](#results)
+- [Limitations](#limitations)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Security and privacy](#security-and-privacy)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License and third-party licenses](#license-and-third-party-licenses)
+- [Acknowledgements](#acknowledgements)
 
-## La bibliothèque en chiffres
+## Overview
 
-Ces chiffres viennent de l'indexation du 20 octobre 2026.
+The [Model Context Protocol](https://modelcontextprotocol.io) (MCP) lets an assistant call tools that run outside it. legal-skills-mcp is one such server: it runs as a local process and talks to the MCP client, such as Claude Code, over stdio. The library it searches, legal-skills-open, is published by ThomasMoreAI. The server retrieves skills and drafts nothing itself. The current version is 0.3.0.
 
-| Élément | Valeur |
+It is meant for:
+
+- Lawyers who want their assistant to start from written procedures for a given jurisdiction.
+- Legal-tech teams that want to check what the library covers by country, practice area and language.
+- Developers who need a local, read-only source of legal skills, or an example of hybrid keyword and semantic search.
+
+It finds the skills closest to a request, even when they share no words with the query, and can limit the search to one jurisdiction, language, practice area or tag.
+
+## Features
+
+- Three read-only MCP tools: search, full skill retrieval and facet counts.
+- Keyword (BM25), semantic and hybrid search. Hybrid, the default, interleaves the other two.
+- Filters for jurisdiction, language, practice area and tag, and presets, including `method`, which covers method skills in every language.
+- Cross-language matching through a multilingual model and a hand-written glossary of 19 legal concepts.
+- No request to an external service once the model is downloaded.
+- Third-party text marked as untrusted, and bundled scripts never executed.
+- A keyword-index cache, rebuilt when a skill file changes.
+
+## How it works
+
+```mermaid
+flowchart TD
+    library["legal-skills-open: SKILL.md files"]
+    query["Query from the MCP client"]
+    keyword["Keyword index: BM25, cached in data/"]
+    vectors["Vector index: one vector per skill"]
+    hybrid["Hybrid mode: interleaves both rankings"]
+    results["Ranked skills, returned as untrusted text"]
+
+    library -->|"indexed at startup"| keyword
+    library -->|"npm run build:embeddings"| vectors
+    query --> keyword
+    query -->|"same embedding model"| vectors
+    keyword --> hybrid
+    vectors --> hybrid
+    hybrid --> results
+```
+
+The server keeps two indexes of the library.
+
+The keyword index ranks skills with BM25, a standard formula for text search. Fields have different weights: title 3, name and tags 2, description 2, and the first 6,000 characters of the body 1. Accents are ignored, and German umlauts match in both spellings, so "Gebühren" also matches "Gebuehren". A hand-written glossary links 19 legal concepts across languages: a query with "réclamation" also looks for "complaint", "Beschwerde" and "reclamação", and these equivalents count for half. The index is cached in `data/` (about 128 MB) and rebuilt when a skill file changes size or modification time.
+
+The vector index holds one 384-dimension vector per skill, computed from its title, description and tags. A vector is a list of numbers that describes the meaning of a text. The model is intfloat/multilingual-e5-small in its 8-bit ONNX form (Xenova/multilingual-e5-small), run locally through transformers.js and ONNX Runtime. Each query goes through the same model and is compared with the stored vectors. `npm run build:embeddings` computes the vectors once and stores them in a 31 MB file.
+
+Hybrid mode takes the best keyword result and the best semantic result in turn, and skips duplicates. When keyword search finds a match, its best result ranks first and the best semantic result second.
+
+## Search modes
+
+| Mode | Ranking |
 | --- | --- |
-| Compétences indexées | 20 293 |
-| Codes de pays et de juridictions | 74 |
-| Domaines (thèmes) | 48 |
-| Compétences avec au moins un tag | 733, soit environ 3,6 % |
-| Langues | 20 |
+| `hybrid` (default) | Alternates the best keyword result and the best semantic result, without duplicates |
+| `keyword` | Ranks skills by the words of the query, with BM25 and the glossary |
+| `semantic` | Ranks skills by the meaning of the query, with the vector index |
 
-L'allemand représente 75 % des compétences et l'anglais 18 %. Le français n'en compte que 109, soit 0,5 %.
+## Skills
 
-## Recherche
+In this project, a skill is a set of written instructions for one legal task, such as writing a consumer complaint letter or reviewing an employment contract. Each skill is a Markdown file named `SKILL.md`: a YAML frontmatter header with metadata, then the text that guides the assistant through the task. Some skills also come with supporting files, scripts included.
 
-Le mode `hybrid`, utilisé par défaut, alterne les meilleurs résultats de la recherche par mots-clés et ceux de la recherche par sens. Le mode `keyword` ne retient que les termes exacts. Le mode `semantic` ne retient que le sens.
+The library groups skills by country, then by practice area:
 
-La recherche par mots-clés connaît 19 concepts juridiques dans plusieurs langues. Une requête qui contient « réclamation » cherche aussi « complaint », « Beschwerde » et « reclamação », avec un poids moitié. Cette liste est écrite à la main. Elle couvre les notions les plus demandées, pas l'ensemble du droit.
+```text
+{country}/{practice}/skills/{slug}/SKILL.md
+```
 
-La recherche par sens utilise [Xenova/multilingual-e5-small](https://huggingface.co/Xenova/multilingual-e5-small). Ce modèle tourne en local avec ONNX Runtime. Les vecteurs sont calculés une seule fois, par `npm run build:embeddings`.
+A skill's id follows the same pattern, for example `fr/contracts/skills/<slug>`. The main frontmatter fields are:
 
-## Installation
+| Field | Content |
+| --- | --- |
+| `name` | The skill's name |
+| `description` | A short summary of what the skill does |
+| `license` | The skill's own license |
+| `jurisdiction` | A jurisdiction code, such as `fr`, `de`, `eu` or `general` |
+| `practice` | The practice area, also called theme, such as `consumer`, `employment` or `contracts` |
+| `language` | A language code, such as `en`, `fr`, `de` or `zh` |
+| `tags` | Task types or topics, such as `drafting` or `litigation`; most skills have none |
+
+The server never executes scripts bundled with a skill; `get_legal_skill` only lists them.
+
+## The library at a glance
+
+| Measure | Value |
+| --- | --- |
+| Skills | 20,293 |
+| Jurisdiction codes | 74 |
+| Practice areas (themes) | 48 |
+| Languages | 20 |
+| Skills with at least one tag | 733, about 3.6% |
+| Most frequent tags | `drafting` 407, `agreement` 194, `transactional` 168, `litigation` 110 |
+
+Coverage by language is very uneven:
+
+| Language | Skills |
+| --- | --- |
+| German | 15,210 (75%) |
+| English | 3,736 (18%) |
+| Spanish | 471 |
+| Portuguese | 294 |
+| Chinese | 245 |
+| French | 109 (0.5%) |
+| Turkish | 69 |
+| Italian | 65 |
+
+## Quick start
+
+You need Node.js 22 or later and Git.
 
 ```bash
 git clone --recurse-submodules https://github.com/T-Celor/legal-skills-mcp.git
@@ -46,60 +150,173 @@ npm run build
 npm run build:embeddings
 ```
 
-La première exécution de `build:embeddings` télécharge le modèle, d'environ 118 Mo, et prend une dizaine de minutes. Le dossier `data/` pèse environ 160 Mo : l'index vectoriel (31 Mo) et le cache de l'index par mots-clés (environ 128 Mo). Le dossier `data/` et le dossier `.cache/` ne sont pas versionnés.
+The `--recurse-submodules` flag also fetches legal-skills-open, which the server reads from `vendor/legal-skills-open` by default.
 
-## Connexion à Claude Code
+> [!NOTE]
+> The first run of `npm run build:embeddings` downloads the model, about 118 MB, and takes about 11 minutes.
 
-Le fichier `.mcp.json` déclare le serveur `legal-skills`, qui se lance avec `node dist/index.js`. Ouvrez le dossier du projet dans Claude Code. La première fois, Claude Code demande d'approuver ce serveur. La commande `claude mcp list` affiche le serveur comme connecté.
+In Claude Code, open the project folder. The `.mcp.json` file at its root declares the server as `legal-skills`, started with `node dist/index.js`, and Claude Code asks you to approve it the first time. Check the connection with:
 
-## Performances
+```bash
+claude mcp list
+```
 
-Mesures faites sur la bibliothèque complète, sur un poste Windows 11 à 6 processeurs logiques :
+`legal-skills` should appear as connected. Other MCP clients can start the same command, `node dist/index.js`, from the repository folder.
 
-- connexion au serveur : environ 1,5 s quand le cache existe ;
-- premier appel de recherche : environ 20 s, le temps de charger le modèle et l'index vectoriel ;
-- appels suivants : environ 200 ms ;
-- démarrage sans cache, par exemple après une modification de la bibliothèque : environ 90 s.
+## Usage
 
-## Tests
+The server exposes three tools, all read-only:
+
+| Tool | Purpose | Main arguments |
+| --- | --- | --- |
+| `search_legal_skills` | Finds skills by keyword, by meaning, or both | `query`; optional `preset` (`method` or `french-general`), `jurisdiction`, `language`, `practice`, `tag`; `limit` from 1 to 25 (default 8); `mode`: `hybrid` (default), `keyword` or `semantic` |
+| `get_legal_skill` | Returns the full `SKILL.md`, up to 200,000 characters, and the list of supporting files | `id`, as returned by a search |
+| `list_legal_facets` | Counts skills per language, jurisdiction, practice and tag | Optional filters |
+
+An assistant can start with `list_legal_facets` to see what exists for a language or jurisdiction, search with `search_legal_skills`, then read one result with `get_legal_skill`. Filter values are lowercase, such as `fr`, `zh` or `employment`, and `list_legal_facets` shows the values in use.
+
+Example arguments for `search_legal_skills`:
+
+```json
+{
+  "query": "rupture du contrat de travail par l'employeur",
+  "jurisdiction": "fr",
+  "language": "fr",
+  "limit": 4,
+  "mode": "hybrid"
+}
+```
+
+### Choosing filters
+
+Filters combine with AND, so each filter you add narrows the results. Explicit filters override the values a preset sets. Call `list_legal_facets` with the same explicit filters to see how many skills remain.
+
+- For a topic question in French, start with `"language": "fr"` (109 skills). Add `"jurisdiction": "fr"` (127 skills, or 65 when combined with French) only when the question concerns France.
+- For a method question, in any language, use `"preset": "method"`. It selects the general practice area: 2,165 skills in every country and language, such as research methods, workflows and quality checks. Leave `practice` empty for topic searches.
+- The preset `"french-general"` sets `"jurisdiction": "fr"`, `"practice": "general"` and `"language": "fr"`. It matches 12 French method skills, and it leaves out skills whose jurisdiction is `general`, such as *Complaint Letter Writer*, the top result for "réclamation consommateur". Use it when you need French method skills specifically.
+
+## Results
+
+Four of the six queries tested are shown. Each was run in keyword mode and in hybrid mode on the full library, and the top 4 results were compared.
+
+| Query | Keyword mode | Hybrid mode | Takeaway |
+| --- | --- | --- | --- |
+| "réclamation consommateur" (consumer complaint) | "Complaint Letter Writer" first | Same first result; "Digital Consumer Claims Triage" joins the top 4 | Hybrid adds a consumer-claims skill |
+| "Beschwerde gegen eine Bank wegen unberechtigter Gebühren" (complaint against a bank over unjustified fees) | No Bundesnetzagentur or ombudsman skill in the top 4 | The Bundesnetzagentur complaint skill and a German ombudsman and BaFin skill join the top 4 | Better, but still weak overall |
+| "rupture du contrat de travail par l'employeur" (termination of employment by the employer) | Four French employment skills | The same four skills | No change |
+| "保密协议审查" (confidentiality agreement review) | "/review" first, the exact-title skill second, "/customize" in the top 4 | Same first two; a Chinese contract-review skill replaces "/customize" | A generic result gives way to a contract-review skill |
+
+Across all six queries tested, hybrid mode never lowered the first result and improved the top 4 for three of them.
+
+### Method search in any language
+
+With the `method` preset, a question about method finds method skills whatever language it is written in. Each query below was run with `"preset": "method"` and the default hybrid mode.
+
+| Query | Top results |
+| --- | --- |
+| "step by step method for legal research" | Legal Research Methodology; Legal Research Guide; Legal Research |
+| "Methode fuer juristische Recherche" | Rechercher le droit applicable (French); German skills on legal methodology |
+| "how to check a legal deliverable before sending it" | Deliverable Fidelity EN; Output scoring - a scorecard before you send |
+
+Measured on Windows 11 with 6 logical processors and the full library:
+
+| Step | Time |
+| --- | --- |
+| Connection, with the cache | About 1.5 s |
+| First search, which loads the model and the vectors | About 20 s |
+| Later searches | About 0.2 s |
+| Cold start without the cache, for example after the library changes | About 90 s |
+
+## Limitations
+
+- The embedding model is light and sometimes returns off-topic results for vague queries.
+- Tags cover about 3.6% of the library, so the tag filter is partial.
+- French is under-represented, with 109 skills. For French questions, start with the language filter (see [Choosing filters](#choosing-filters)).
+- The German query on bank fees stays weak, even in hybrid mode.
+- The glossary is written by hand and does not cover all of law.
+- The first call can exceed a client's 60-second timeout on a busy disk: loading the keyword cache alone took close to 80 seconds once. The index then stays in memory, so a retry is fast.
+- Results are not legal advice, and the project does not guarantee the legal quality of third-party skills.
+
+## Configuration
+
+The server reads two optional environment variables:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `LEGAL_SKILLS_DIR` | Folder of the skill library | `vendor/legal-skills-open` |
+| `LEGAL_SKILLS_DATA` | Folder of the indexes | `data/` |
+
+## Development
+
+The server is written in TypeScript. Its main dependencies are `@modelcontextprotocol/sdk`, `@huggingface/transformers`, `yaml` and `zod`.
+
+| Command | What it does |
+| --- | --- |
+| `npm run build` | Compiles the TypeScript sources into `dist/` |
+| `npm run typecheck` | Checks types without writing files |
+| `npm test` | Builds, then runs the tests with the Node.js test runner |
+| `npm run build:embeddings` | Builds, then computes the vector index |
+| `npm start` | Starts the server over stdio |
+
+Project layout:
+
+```text
+src/index.ts             stdio entry point
+src/server.ts            the three tools
+src/catalog.ts           loading, indexing, cache, facets
+src/search.ts            BM25 ranking
+src/glossary.ts          cross-language concepts
+src/text.ts              tokenisation
+src/semantic.ts          vectors, similarity, interleaving
+src/embedder.ts          the transformers.js model
+src/build-embeddings.ts  builds the vector index
+src/labels.ts            language names
+```
+
+To run the tests:
 
 ```bash
 npm test
 ```
 
-La suite compte 67 tests. Elle couvre l'indexation, la recherche, le glossaire, le cache, le protocole MCP, le point d'entrée stdio et la recherche hybride. Elle inclut aussi la bibliothèque réelle quand le sous-module est présent.
+The 71 automated tests cover indexing, search, the glossary, the cache, the MCP protocol, the stdio entry point, hybrid search and filter presets. They also use the real library when the submodule is present.
 
-## Exemples
+## Security and privacy
 
-Résultats réels du mode hybride, à titre d'illustration. Le classement reste à relire.
+- Once the model is downloaded, the server sends no request to an external service.
+- Results reach the assistant's model like any other tool output.
+- Third-party skill text is returned marked as untrusted, inside a random boundary that changes with each response.
+- Bundled scripts are never executed.
+- Symbolic links are never followed, and YAML aliases are refused.
+- Skill ids are looked up in an index and never used as file paths.
 
-- « réclamation consommateur » : *Complaint Letter Writer* (général, français) en tête, et *Digital Consumer Claims Triage* (Brésil, anglais) parmi les quatre premiers.
-- « Beschwerde gegen eine Bank wegen unberechtigter Gebühren » : parmi les quatre premiers, *Beschwerde bei der Bundesnetzagentur* (Allemagne) et un résultat sur le médiateur bancaire et la BaFin.
-- « rupture du contrat de travail par l'employeur » : *Mettre fin à une période d'essai*, puis *Se séparer d'un salarié d'un commun accord* (France).
+## Roadmap
 
-## Limites
+Ideas for later versions, open to discussion:
 
-- La recherche par sens utilise un modèle léger. Elle remonte parfois des résultats hors sujet, surtout pour une requête vague.
-- Les tags ne couvrent que 3,6 % de la bibliothèque. Le filtre par type de tâche reste donc partiel.
-- Le français est peu représenté. Pour une question française, le filtre par pays et par domaine aide beaucoup.
-- Une requête sur les frais bancaires en Allemagne donne des résultats faibles, dans les deux modes.
-- Les résultats ne sont pas un avis juridique. Les compétences viennent de contributeurs variés, et le projet ne garantit pas leur qualité juridique. Vérifiez chaque point auprès des sources officielles.
+- Try a larger multilingual embedding model, or one trained on legal text, to reduce off-topic results.
+- Extend the glossary beyond its 19 concepts, starting with weak topics such as bank fees.
+- Build a larger set of test queries with expected results, so that ranking changes can be measured.
+- Propose tags for untagged skills to legal-skills-open, so that the tag filter covers more of the library.
 
-## Sécurité et confidentialité
+## Contributing
 
-- Le serveur n'envoie aucune requête à un service externe une fois le modèle téléchargé.
-- Les résultats que l'assistant reçoit suivent le même chemin que tout contenu renvoyé par un outil, vers le modèle de conversation.
-- Le texte des compétences vient d'un tiers. Il est renvoyé encadré comme contenu non fiable, avec un identifiant aléatoire par réponse.
-- Les scripts livrés avec certaines compétences sont listés, jamais exécutés.
-- Les liens symboliques ne sont jamais suivis. Les identifiants de compétences ne servent jamais de chemins de fichiers.
+Bug reports and pull requests are welcome on [GitHub](https://github.com/T-Celor/legal-skills-mcp/issues). Please run `npm run typecheck` and `npm test` before opening a pull request. Changes to the skills themselves belong in [legal-skills-open](https://github.com/ThomasMoreAI/legal-skills-open).
 
-## Variables d'environnement
+## License and third-party licenses
 
-- `LEGAL_SKILLS_DIR` indique le dossier de la bibliothèque. Par défaut, il s'agit de `vendor/legal-skills-open`.
-- `LEGAL_SKILLS_DATA` indique le dossier des index. Par défaut, il s'agit de `data/`.
+| Component | License |
+| --- | --- |
+| legal-skills-mcp (this repository) | MIT, see [LICENSE](LICENSE) |
+| [legal-skills-open](https://github.com/ThomasMoreAI/legal-skills-open) | Apache-2.0 |
+| Each skill | Its own license, in the `license` field of its frontmatter |
+| [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small), the upstream model | MIT |
+| [Xenova/multilingual-e5-small](https://huggingface.co/Xenova/multilingual-e5-small), its ONNX conversion | No license of its own declared |
 
-## Licences
+Check a skill's license before you redistribute it.
 
-- Ce dépôt est sous licence MIT. Voir le fichier LICENSE.
-- [legal-skills-open](https://github.com/ThomasMoreAI/legal-skills-open) est sous licence Apache-2.0. Chaque compétence indique sa propre licence dans le champ `license`. Vérifiez-la avant toute redistribution.
-- Le modèle d'origine, [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small), est sous licence MIT. La version convertie pour ONNX ne déclare pas de licence propre.
+## Acknowledgements
+
+- [ThomasMoreAI](https://github.com/ThomasMoreAI) for legal-skills-open.
+- intfloat for multilingual-e5-small, and Xenova for its ONNX conversion.
+- The maintainers of the MCP TypeScript SDK, transformers.js, ONNX Runtime, yaml and zod.
