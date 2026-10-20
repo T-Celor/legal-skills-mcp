@@ -1,4 +1,6 @@
-import { lstat, open, readdir, realpath } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import type { Dirent } from 'node:fs';
+import { lstat, mkdir, open, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { LANGUAGE_NAMES } from './labels.js';
@@ -91,10 +93,18 @@ export interface Facets {
  * Indexes every `<...>/skills/<slug>/SKILL.md` under `root`.
  * Symbolic links are never followed, so nothing outside `root` can be read.
  */
-export async function loadCatalog(root: string): Promise<Catalog> {
+export async function loadCatalog(root: string, options: { cacheFile?: string } = {}): Promise<Catalog> {
   // Throws when the library folder is missing.
   const realRoot = await realpath(root);
   const candidates = await findSkillFiles(root);
+  // With a cache file, reuse it when no skill file has changed since it was written.
+  const fingerprint = options.cacheFile ? await fingerprintFiles(root, candidates) : null;
+  if (options.cacheFile && fingerprint) {
+    const cached = await readCatalogCache(options.cacheFile, fingerprint, root, realRoot);
+    if (cached) {
+      return cached;
+    }
+  }
   const skills = new Map<string, IndexedSkill>();
   let skipped = 0;
 
@@ -128,7 +138,7 @@ export async function loadCatalog(root: string): Promise<Catalog> {
     }
   }
 
-  return {
+  const catalog: Catalog = {
     root,
     realRoot,
     skills,
@@ -136,6 +146,12 @@ export async function loadCatalog(root: string): Promise<Catalog> {
     averageLength: totalLength / skills.size,
     skipped,
   };
+  if (options.cacheFile && fingerprint) {
+    await writeCatalogCache(options.cacheFile, fingerprint, catalog).catch((error: unknown) => {
+      console.error('[legal-skills] could not write the catalog cache:', error);
+    });
+  }
+  return catalog;
 }
 
 /** True when a skill matches every filter that is set. */
@@ -238,39 +254,48 @@ function toFacets(counts: Map<string, number>): Facet[] {
 
 async function findSkillFiles(root: string): Promise<string[]> {
   const found: string[] = [];
-  const pending = [root];
+  let level = [root];
 
-  while (pending.length > 0) {
-    const dir = pending.pop();
-    if (dir === undefined) {
-      break;
-    }
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch (error) {
-      // The root must exist; an unreadable sub-folder is skipped.
-      if (dir === root) {
-        throw error;
-      }
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) {
+  while (level.length > 0) {
+    // The folders of one level are listed in parallel: listing folders is slow on Windows.
+    const listings = await Promise.all(level.map(listFolder));
+    const next: string[] = [];
+    for (const listing of listings) {
+      if ('error' in listing) {
+        // The root must exist; an unreadable sub-folder is skipped.
+        if (listing.dir === root) {
+          throw listing.error;
+        }
         continue;
       }
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name !== '.git' && entry.name !== 'node_modules') {
-          pending.push(full);
+      for (const entry of listing.entries) {
+        if (entry.isSymbolicLink()) {
+          continue;
         }
-      } else if (entry.isFile() && entry.name === SKILL_FILE && isInSkillsFolder(full)) {
-        found.push(full);
+        const full = path.join(listing.dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== '.git' && entry.name !== 'node_modules') {
+            next.push(full);
+          }
+        } else if (entry.isFile() && entry.name === SKILL_FILE && isInSkillsFolder(full)) {
+          found.push(full);
+        }
       }
     }
+    level = next;
   }
 
   return found.sort();
+}
+
+type Listing = { dir: string; entries: Dirent[] } | { dir: string; error: unknown };
+
+async function listFolder(dir: string): Promise<Listing> {
+  try {
+    return { dir, entries: await readdir(dir, { withFileTypes: true }) };
+  } catch (error) {
+    return { dir, error };
+  }
 }
 
 function isInSkillsFolder(file: string): boolean {
@@ -418,4 +443,92 @@ async function listSupportingFiles(skillFolder: string): Promise<string[]> {
   }
 
   return files.sort();
+}
+
+/** Bump when the shape of SkillMeta or the index changes, so old caches are ignored. */
+const CACHE_FORMAT = 1;
+
+interface CacheFile {
+  format: number;
+  fingerprint: string;
+  averageLength: number;
+  skipped: number;
+  documentFrequency: Array<[string, number]>;
+  skills: Array<{ meta: SkillMeta; file: string; length: number; weights: Array<[string, number]> }>;
+}
+
+/**
+ * Fingerprint of the skill files: their paths, sizes and modification times. Any edit
+ * to the library changes it. Returns null when a file cannot be inspected.
+ */
+async function fingerprintFiles(root: string, files: string[]): Promise<string | null> {
+  const lines: string[] = [];
+  try {
+    for (let i = 0; i < files.length; i += SCAN_BATCH) {
+      const batch = files.slice(i, i + SCAN_BATCH);
+      const infos = await Promise.all(batch.map((file) => stat(file)));
+      batch.forEach((file, index) => {
+        const info = infos[index];
+        lines.push(`${path.relative(root, file)}|${info?.size ?? -1}|${info?.mtimeMs ?? -1}`);
+      });
+    }
+  } catch {
+    return null;
+  }
+  return createHash('sha256').update(lines.join('\n')).digest('hex');
+}
+
+async function writeCatalogCache(cacheFile: string, fingerprint: string, catalog: Catalog): Promise<void> {
+  const data: CacheFile = {
+    format: CACHE_FORMAT,
+    fingerprint,
+    averageLength: catalog.averageLength,
+    skipped: catalog.skipped,
+    documentFrequency: [...catalog.documentFrequency],
+    skills: [...catalog.skills.values()].map((skill) => ({
+      meta: skill.meta,
+      file: path.relative(catalog.root, skill.filePath).split(path.sep).join('/'),
+      length: skill.length,
+      weights: [...skill.weights],
+    })),
+  };
+  await mkdir(path.dirname(cacheFile), { recursive: true });
+  await writeFile(cacheFile, JSON.stringify(data), 'utf8');
+}
+
+/** Returns the cached catalog, or null when the cache is missing, old, or stale. */
+async function readCatalogCache(
+  cacheFile: string,
+  fingerprint: string,
+  root: string,
+  realRoot: string,
+): Promise<Catalog | null> {
+  let data: CacheFile;
+  try {
+    data = JSON.parse(await readFile(cacheFile, 'utf8')) as CacheFile;
+  } catch {
+    return null;
+  }
+  if (data.format !== CACHE_FORMAT || data.fingerprint !== fingerprint) {
+    return null;
+  }
+
+  const skills = new Map<string, IndexedSkill>();
+  for (const entry of data.skills) {
+    skills.set(entry.meta.id, {
+      meta: entry.meta,
+      filePath: path.join(root, ...entry.file.split('/')),
+      weights: new Map(entry.weights),
+      length: entry.length,
+    });
+  }
+  console.error(`[legal-skills] loaded ${skills.size} skills from the catalog cache`);
+  return {
+    root,
+    realRoot,
+    skills,
+    documentFrequency: new Map(data.documentFrequency),
+    averageLength: data.averageLength,
+    skipped: data.skipped,
+  };
 }
