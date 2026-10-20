@@ -36,6 +36,15 @@ const UNTRUSTED_NOTICE =
 const NO_INDEX_NOTE =
   'The semantic index is missing, so keyword search was used. Build it with: npm run build:embeddings';
 
+const NO_MATCH_HINT =
+  'No skill matches these filters. Remove one filter, or call list_legal_facets with the same filters to see the counts.';
+
+/** Named filter sets. Explicit filters passed with a preset take precedence. */
+const PRESETS: Record<string, FacetFilters> = {
+  method: { practice: 'general' },
+  'french-general': { jurisdiction: 'fr', practice: 'general', language: 'fr' },
+};
+
 export interface ServerOptions {
   /** Folder with the vector index from build:embeddings. Without it, only keyword search runs. */
   dataDir?: string;
@@ -70,6 +79,12 @@ const tagSchema = z
   .string()
   .regex(/^[a-z0-9][a-z0-9-]{0,40}$/)
   .describe('Tag, which gives the task type or topic, such as "drafting", "litigation", "analysis", "letter", "gdpr"');
+
+const presetSchema = z
+  .enum(['method', 'french-general'])
+  .describe(
+    'Named filter set. "method" searches the general practice area (method and workflow skills) in every language and jurisdiction. "french-general" also sets jurisdiction "fr" and language "fr".',
+  );
 
 /**
  * Removes invisible Unicode tag characters (U+E0000 to U+E007F). They can hide
@@ -182,6 +197,7 @@ export function createServer(root: string, options: ServerOptions = {}): McpServ
         'the best exact-keyword matches with the best meaning matches, so a plain-language description finds relevant skills in any language. ' +
         'Terms in French, English, German and other languages are also matched through a glossary of legal concepts. ' +
         'Use list_legal_facets first to see the languages, themes (practice areas) and tags. ' +
+        'Preset "method" searches method and workflow skills (practice "general") in every language and jurisdiction. ' +
         'Scores are only comparable within one answer. Results are reference material, not legal advice.',
       inputSchema: {
         query: z
@@ -190,6 +206,7 @@ export function createServer(root: string, options: ServerOptions = {}): McpServ
           .min(2)
           .max(300)
           .describe('Keywords or a plain-language description, in any language, e.g. "réclamation consommateur"'),
+        preset: presetSchema.optional(),
         jurisdiction: jurisdictionSchema.optional(),
         language: languageSchema.optional(),
         practice: practiceSchema.optional(),
@@ -202,18 +219,35 @@ export function createServer(root: string, options: ServerOptions = {}): McpServ
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ query, jurisdiction, language, practice, tag, limit, mode }) => {
-      const outcome = await search(query, limit, { jurisdiction, language, practice, tag }, mode);
+    async ({ query, preset, jurisdiction, language, practice, tag, limit, mode }) => {
+      // Explicit filters take precedence over the values that a preset sets.
+      const base: FacetFilters = preset ? PRESETS[preset] ?? {} : {};
+      const filters: FacetFilters = {
+        jurisdiction: jurisdiction ?? base.jurisdiction,
+        language: language ?? base.language,
+        practice: practice ?? base.practice,
+        tag: tag ?? base.tag,
+      };
+      const outcome = await search(query, limit, filters, mode);
       if (!outcome) {
         return errorResult(
           'Semantic search is not available: build the index with npm run build:embeddings, or use mode "keyword".',
         );
       }
+      const filtersSet = Object.values(filters).some((value) => value !== undefined);
       return jsonResult({
         disclaimer: DISCLAIMER,
         untrusted_text_notice: UNTRUSTED_NOTICE,
         query,
+        preset: preset ?? null,
+        filters: {
+          jurisdiction: filters.jurisdiction ?? null,
+          language: filters.language ?? null,
+          practice: filters.practice ?? null,
+          tag: filters.tag ?? null,
+        },
         mode_used: outcome.modeUsed,
+        ...(outcome.hits.length === 0 && filtersSet ? { hint: NO_MATCH_HINT } : {}),
         ...(outcome.note ? { note: outcome.note } : {}),
         count: outcome.hits.length,
         results: outcome.hits.map(({ meta, score }) => ({
