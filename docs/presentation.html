@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>legal-skills-mcp</title>
+<style>
+  :root {
+    --bg: #f7f6f2;
+    --fg: #1d1d1b;
+    --muted: #5d6068;
+    --accent: #2f5d8a;
+    --card: #ffffff;
+    --line: #d9d7cf;
+    --tile: #e9f0f7;
+    --code: #eeeeea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15171b;
+      --fg: #ebebeb;
+      --muted: #a3a7af;
+      --accent: #8fb7e0;
+      --card: #1e2127;
+      --line: #2e333c;
+      --tile: #1d2b38;
+      --code: #262a31;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15171b;
+    --fg: #ebebeb;
+    --muted: #a3a7af;
+    --accent: #8fb7e0;
+    --card: #1e2127;
+    --line: #2e333c;
+    --tile: #1d2b38;
+    --code: #262a31;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  main { max-width: 980px; margin: 0 auto; padding: 48px 20px 72px; }
+  h1 { font-size: 2.4rem; line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.01em; }
+  h2 { font-size: 1.45rem; margin: 56px 0 14px; }
+  h3 { font-size: 1.05rem; margin: 0 0 6px; }
+  p { margin: 0 0 14px; }
+  .lead { font-size: 1.15rem; color: var(--muted); max-width: 46rem; margin-bottom: 28px; }
+  a { color: var(--accent); }
+  code, pre { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.92em; }
+  code { background: var(--code); padding: 1px 6px; border-radius: 5px; }
+  pre { background: var(--code); padding: 14px 16px; border-radius: 10px; overflow-x: auto; margin: 0 0 16px; }
+  pre code { background: none; padding: 0; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 8px 0 4px; }
+  .tile { background: var(--tile); border-radius: 12px; padding: 16px 18px; }
+  .tile .value { font-size: 1.7rem; font-weight: 650; color: var(--accent); line-height: 1.2; }
+  .tile .label { color: var(--muted); font-size: 0.92rem; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .card code { font-size: 0.9em; }
+
+  .flow { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .flow svg { width: 100%; height: auto; display: block; }
+  .flow .box { fill: var(--tile); stroke: var(--accent); stroke-width: 1.2; }
+  .flow .box-alt { fill: var(--card); stroke: var(--line); stroke-width: 1.2; }
+  .flow .text { fill: var(--fg); font: 14px system-ui, "Segoe UI", Roboto, Arial, sans-serif; }
+  .flow .small { fill: var(--muted); font: 12px system-ui, "Segoe UI", Roboto, Arial, sans-serif; }
+  .flow .arrow { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; background: var(--tile); }
+  tr:last-child td { border-bottom: none; }
+
+  .compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+  .compare .card ol { margin: 8px 0 0; padding-left: 20px; }
+  .compare .card li { margin: 2px 0; }
+  .query { color: var(--muted); font-size: 0.95rem; margin: 0 0 10px; }
+  .muted { color: var(--muted); }
+
+  ul.plain { padding-left: 20px; margin: 0 0 14px; }
+  ul.plain li { margin: 6px 0; }
+
+  footer { margin-top: 64px; color: var(--muted); font-size: 0.92rem; border-top: 1px solid var(--line); padding-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+
+  <h1>legal-skills-mcp</h1>
+  <p class="lead">Un serveur MCP qui permet à Claude de chercher dans une bibliothèque de compétences juridiques, par mots-clés, par sens, ou les deux, dans plusieurs langues.</p>
+
+  <section class="tiles" aria-label="Chiffres clés">
+    <div class="tile"><div class="value">20 293</div><div class="label">compétences indexées</div></div>
+    <div class="tile"><div class="value">74</div><div class="label">codes de pays et de juridictions</div></div>
+    <div class="tile"><div class="value">48</div><div class="label">domaines, ou thèmes</div></div>
+    <div class="tile"><div class="value">20</div><div class="label">langues représentées</div></div>
+    <div class="tile"><div class="value">67</div><div class="label">tests automatisés</div></div>
+  </section>
+
+  <h2>Ce que le serveur propose</h2>
+  <section class="cards">
+    <article class="card">
+      <h3><code>search_legal_skills</code></h3>
+      <p class="muted">Cherche des compétences. Trois modes : hybride par défaut, mots-clés, ou sens. Filtres par pays, langue, domaine et tag.</p>
+    </article>
+    <article class="card">
+      <h3><code>get_legal_skill</code></h3>
+      <p class="muted">Renvoie le texte complet d'une compétence et la liste de ses fichiers annexes. Les scripts sont listés, jamais exécutés.</p>
+    </article>
+    <article class="card">
+      <h3><code>list_legal_facets</code></h3>
+      <p class="muted">Compte les compétences par langue, pays, domaine et tag. Sert à parcourir la bibliothèque avant de chercher.</p>
+    </article>
+  </section>
+
+  <h2>Comment ça marche</h2>
+  <section class="flow" aria-label="Schéma du fonctionnement">
+    <svg viewBox="0 0 760 300" role="img" aria-labelledby="flow-title">
+      <title id="flow-title">Schéma : Claude Code envoie une requête au serveur, qui combine deux index et renvoie les résultats</title>
+      <defs>
+        <marker id="head" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--muted)"></path>
+        </marker>
+      </defs>
+      <rect class="box" x="10" y="120" width="150" height="60" rx="10"></rect>
+      <text class="text" x="85" y="146" text-anchor="middle">Claude Code</text>
+      <text class="small" x="85" y="164" text-anchor="middle">le client</text>
+
+      <rect class="box" x="200" y="120" width="170" height="60" rx="10"></rect>
+      <text class="text" x="285" y="146" text-anchor="middle">Serveur MCP</text>
+      <text class="small" x="285" y="164" text-anchor="middle">stdio, lecture seule</text>
+
+      <rect class="box-alt" x="430" y="30" width="200" height="74" rx="10"></rect>
+      <text class="text" x="530" y="58" text-anchor="middle">Index par mots-clés</text>
+      <text class="small" x="530" y="78" text-anchor="middle">BM25 et glossaire multilingue</text>
+
+      <rect class="box-alt" x="430" y="196" width="200" height="74" rx="10"></rect>
+      <text class="text" x="530" y="224" text-anchor="middle">Index vectoriel</text>
+      <text class="small" x="530" y="244" text-anchor="middle">e5 multilingue, 384 dimensions</text>
+
+      <rect class="box" x="668" y="120" width="82" height="60" rx="10"></rect>
+      <text class="text" x="709" y="146" text-anchor="middle">Résultats</text>
+      <text class="small" x="709" y="164" text-anchor="middle">alternés</text>
+
+      <path class="arrow" d="M160,150 L200,150" marker-end="url(#head)"></path>
+      <path class="arrow" d="M370,140 L430,88" marker-end="url(#head)"></path>
+      <path class="arrow" d="M370,160 L430,220" marker-end="url(#head)"></path>
+      <path class="arrow" d="M630,67 L668,140" marker-end="url(#head)"></path>
+      <path class="arrow" d="M630,233 L668,160" marker-end="url(#head)"></path>
+    </svg>
+  </section>
+  <p class="muted" style="margin-top:12px">Le mode hybride prend les meilleurs résultats de chaque index, à tour de rôle, sans doublon. Un résultat trouvé par un seul index reste donc visible, même s'il n'est pas dans le top de l'autre.</p>
+
+  <h2>Trois modes de recherche</h2>
+  <table>
+    <thead><tr><th>Mode</th><th>Ce qu'il retient</th><th>Quand l'utiliser</th></tr></thead>
+    <tbody>
+      <tr><td><code>hybrid</code> (défaut)</td><td>Les meilleurs résultats des deux index, alternés</td><td>Une question en langage courant, dans n'importe quelle langue</td></tr>
+      <tr><td><code>keyword</code></td><td>Les termes exacts, avec le glossaire de concepts</td><td>Un terme précis, un titre, un article de loi</td></tr>
+      <tr><td><code>semantic</code></td><td>Le sens seul</td><td>Une formulation éloignée du vocabulaire des compétences</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Exemples mesurés</h2>
+  <p class="muted">Résultats réels du serveur, sur la bibliothèque complète. Les deux colonnes comparent les modes mots-clés et hybride. Le classement reste à relire.</p>
+
+  <section class="compare">
+    <article class="card">
+      <h3>« réclamation consommateur »</h3>
+      <p class="query">Mots-clés</p>
+      <ol>
+        <li>Complaint Letter Writer</li>
+        <li>广告合规审核</li>
+        <li>Cold start interview</li>
+        <li>Skill：隐私与范围守门</li>
+      </ol>
+      <p class="query" style="margin-top:12px">Hybride</p>
+      <ol>
+        <li>Complaint Letter Writer</li>
+        <li>广告合规审核</li>
+        <li>Digital Consumer Claims Triage</li>
+        <li>Cold start interview</li>
+      </ol>
+    </article>
+
+    <article class="card">
+      <h3>« Beschwerde gegen eine Bank wegen unberechtigter Gebühren »</h3>
+      <p class="query">Mots-clés</p>
+      <ol>
+        <li>Kreditkündigung</li>
+        <li>Fachanwalt Bank Kapitalmarktrecht</li>
+        <li>Unionsmarke anmelden</li>
+        <li>DPMA, BPatG und BGH</li>
+      </ol>
+      <p class="query" style="margin-top:12px">Hybride</p>
+      <ol>
+        <li>Kreditkündigung</li>
+        <li>Beschwerde bei der Bundesnetzagentur</li>
+        <li>Fachanwalt Bank Kapitalmarktrecht</li>
+        <li>Mandant will vor Klage Bank-Streit durch Ombudsmann-Verfahren oder BaFin</li>
+      </ol>
+    </article>
+
+    <article class="card">
+      <h3>« rupture du contrat de travail par l'employeur »</h3>
+      <p class="query">Mots-clés</p>
+      <ol>
+        <li>Mettre fin à une période d'essai</li>
+        <li>Se séparer d'un salarié d'un commun accord</li>
+        <li>Calculer les congés payés d'un salarié</li>
+        <li>Rédiger ou relire un contrat de travail</li>
+      </ol>
+      <p class="query" style="margin-top:12px">Hybride</p>
+      <ol>
+        <li>Mettre fin à une période d'essai</li>
+        <li>Se séparer d'un salarié d'un commun accord</li>
+        <li>Rédiger ou relire un contrat de travail</li>
+        <li>Calculer les congés payés d'un salarié</li>
+      </ol>
+    </article>
+  </section>
+  <p class="muted" style="margin-top:12px">Sur la requête allemande, le mode hybride trouve le médiateur bancaire et la BaFin, que le mode mots-clés ne montre pas dans son top 4. Sur les autres requêtes, les deux modes se ressemblent.</p>
+
+  <h2>Limites</h2>
+  <ul class="plain">
+    <li>La recherche par sens utilise un modèle léger. Elle remonte parfois des résultats hors sujet, surtout pour une requête vague.</li>
+    <li>Les tags ne couvrent que 3,6 % de la bibliothèque. Le filtre par type de tâche reste donc partiel.</li>
+    <li>Le français est peu représenté, avec 109 compétences sur 20 293. Pour une question française, le filtre par pays et par domaine aide beaucoup.</li>
+    <li>Le glossaire est écrit à la main et couvre 19 concepts.</li>
+    <li>Les résultats ne sont pas un avis juridique. Le projet ne garantit pas la qualité juridique des compétences : vérifiez chaque point auprès des sources officielles.</li>
+  </ul>
+
+  <h2>Installer</h2>
+  <pre><code>git clone --recurse-submodules &lt;url-du-depot&gt;
+cd legal-skills-mcp
+npm install
+npm run build
+npm run build:embeddings</code></pre>
+  <p class="muted">La première construction de l'index sémantique télécharge un modèle d'environ 118 Mo et prend une dizaine de minutes. Ensuite, ouvrez le dossier dans Claude Code et approuvez le serveur <code>legal-skills</code>.</p>
+
+  <footer>
+    Projet privé pour l'instant. Les licences de la bibliothèque et du modèle sont détaillées dans le README.
+  </footer>
+</main>
+</body>
+</html>
