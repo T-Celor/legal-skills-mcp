@@ -98,6 +98,6 @@ Résultats réels du mode hybride, à titre d'illustration. Le classement reste 
 
 ## Licences
 
-- Ce dépôt est privé pour l'instant. Sa licence reste à choisir.
+- Ce dépôt est sous licence MIT. Voir le fichier LICENSE.
 - [legal-skills-open](https://github.com/ThomasMoreAI/legal-skills-open) est sous licence Apache-2.0. Chaque compétence indique sa propre licence dans le champ `license`. Vérifiez-la avant toute redistribution.
 - Le modèle d'origine, [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small), est sous licence MIT. La version convertie pour ONNX ne déclare pas de licence propre.
