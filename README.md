@@ -1,5 +1,7 @@
 # legal-skills-mcp
 
+Une présentation du projet, avec les résultats mesurés, est disponible dans [presentation/README.md](presentation/README.md).
+
 Serveur MCP qui permet à un assistant comme Claude de chercher dans la bibliothèque [legal-skills-open](https://github.com/ThomasMoreAI/legal-skills-open). Elle contient environ 20 000 compétences juridiques au format `SKILL.md`, réparties entre une cinquantaine de pays et de juridictions.
 
 Le serveur retrouve les modèles, les procédures et les listes de contrôle déjà rédigés, pour que l'assistant s'y appuie. Il ne rédige pas à la place de l'utilisateur.
