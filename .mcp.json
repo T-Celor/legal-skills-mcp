@@ -2,7 +2,7 @@
   "mcpServers": {
     "legal-skills": {
       "command": "node",
-      "args": ["dist/index.js"]
+      "args": ["--max-semi-space-size=1", "dist/index.js"]
     }
   }
 }

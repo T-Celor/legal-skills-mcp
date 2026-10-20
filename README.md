@@ -23,6 +23,7 @@ legal-skills-mcp connects an assistant such as Claude to [legal-skills-open](htt
 - [Quick start](#quick-start)
 - [Usage](#usage)
 - [Results](#results)
+- [Memory](#memory)
 - [Limitations](#limitations)
 - [Configuration](#configuration)
 - [Development](#development)
@@ -47,12 +48,12 @@ It finds the skills closest to a request, even when they share no words with the
 ## Features
 
 - Three read-only MCP tools: search, full skill retrieval and facet counts.
-- Keyword (BM25), semantic and hybrid search. Hybrid, the default, interleaves the other two.
+- Keyword (BM25) search by default, plus semantic search and hybrid search, which interleaves the two.
 - Filters for jurisdiction, language, practice area and tag, and presets, including `method`, which covers method skills in every language.
 - Cross-language matching through a multilingual model and a hand-written glossary of 19 legal concepts.
 - No request to an external service once the model is downloaded.
 - Third-party text marked as untrusted, and bundled scripts never executed.
-- A keyword-index cache, rebuilt when a skill file changes.
+- A keyword index in SQLite, rebuilt when a skill file changes. Only the index stays in memory: skill texts are read from disk when they are requested.
 
 ## How it works
 
@@ -60,7 +61,7 @@ It finds the skills closest to a request, even when they share no words with the
 flowchart TD
     library["legal-skills-open: SKILL.md files"]
     query["Query from the MCP client"]
-    keyword["Keyword index: BM25, cached in data/"]
+    keyword["Keyword index: BM25, stored in data/"]
     vectors["Vector index: one vector per skill"]
     hybrid["Hybrid mode: interleaves both rankings"]
     results["Ranked skills, returned as untrusted text"]
@@ -68,7 +69,7 @@ flowchart TD
     library -->|"indexed at startup"| keyword
     library -->|"npm run build:embeddings"| vectors
     query --> keyword
-    query -->|"same embedding model"| vectors
+    query -->|"same embedding model, run in a helper process"| vectors
     keyword --> hybrid
     vectors --> hybrid
     hybrid --> results
@@ -76,9 +77,9 @@ flowchart TD
 
 The server keeps two indexes of the library.
 
-The keyword index ranks skills with BM25, a standard formula for text search. Fields have different weights: title 3, name and tags 2, description 2, and the first 6,000 characters of the body 1. Accents are ignored, and German umlauts match in both spellings, so "Gebühren" also matches "Gebuehren". A hand-written glossary links 19 legal concepts across languages: a query with "réclamation" also looks for "complaint", "Beschwerde" and "reclamação", and these equivalents count for half. The index is cached in `data/` (about 128 MB) and rebuilt when a skill file changes size or modification time.
+The keyword index ranks skills with BM25, a standard formula for text search. Fields have different weights: title 3, name and tags 2, description 2, and the first 6,000 characters of the body 1. Accents are ignored, and German umlauts match in both spellings, so "Gebühren" also matches "Gebuehren". A hand-written glossary links 19 legal concepts across languages: a query with "réclamation" also looks for "complaint", "Beschwerde" and "reclamação", and these equivalents count for half. The index is stored in `data/legal-skills.sqlite` (about 125 MB) and rebuilt when a skill file changes size or modification time. Postings are read from that file for each query, with a page cache of 16 MB, and a skill's text is read from the library only when `get_legal_skill` asks for it.
 
-The vector index holds one 384-dimension vector per skill, computed from its title, description and tags. A vector is a list of numbers that describes the meaning of a text. The model is intfloat/multilingual-e5-small in its 8-bit ONNX form (Xenova/multilingual-e5-small), run locally through transformers.js and ONNX Runtime. Each query goes through the same model and is compared with the stored vectors. `npm run build:embeddings` computes the vectors once and stores them in a 31 MB file.
+The vector index holds one 384-dimension vector per skill, computed from its title, description and tags. A vector is a list of numbers that describes the meaning of a text. The model is intfloat/multilingual-e5-small in its 8-bit ONNX form (Xenova/multilingual-e5-small), run locally through transformers.js and ONNX Runtime. Each query goes through the same model and is compared with the stored vectors. `npm run build:embeddings` computes the vectors once and stores them in a 31 MB file, which is loaded on the first semantic or hybrid search. The model runs in a helper process that starts on that first search and exits after a minute without searches, so its memory goes back to the system.
 
 Hybrid mode takes the best keyword result and the best semantic result in turn, and skips duplicates. When keyword search finds a match, its best result ranks first and the best semantic result second.
 
@@ -86,9 +87,9 @@ Hybrid mode takes the best keyword result and the best semantic result in turn, 
 
 | Mode | Ranking |
 | --- | --- |
-| `hybrid` (default) | Alternates the best keyword result and the best semantic result, without duplicates |
-| `keyword` | Ranks skills by the words of the query, with BM25 and the glossary |
-| `semantic` | Ranks skills by the meaning of the query, with the vector index |
+| `keyword` (default) | Ranks skills by the words of the query, with BM25 and the glossary. Needs no model |
+| `hybrid` | Alternates the best keyword result and the best semantic result, without duplicates. Starts the model in a helper process |
+| `semantic` | Ranks skills by the meaning of the query, with the vector index. Starts the model in a helper process |
 
 ## Skills
 
@@ -155,13 +156,15 @@ The `--recurse-submodules` flag also fetches legal-skills-open, which the server
 > [!NOTE]
 > The first run of `npm run build:embeddings` downloads the model, about 118 MB, and takes about 11 minutes.
 
-In Claude Code, open the project folder. The `.mcp.json` file at its root declares the server as `legal-skills`, started with `node dist/index.js`, and Claude Code asks you to approve it the first time. Check the connection with:
+In Claude Code, open the project folder. The `.mcp.json` file at its root declares the server as `legal-skills`, started with `node --max-semi-space-size=1 dist/index.js`, and Claude Code asks you to approve it the first time. Check the connection with:
 
 ```bash
 claude mcp list
 ```
 
-`legal-skills` should appear as connected. Other MCP clients can start the same command, `node dist/index.js`, from the repository folder.
+`legal-skills` should appear as connected. Other MCP clients can start the same command from the repository folder. The flag keeps memory low (see [Memory](#memory)).
+
+The keyword index is built the first time the server starts, which takes about three minutes. `npm run build:index` builds it ahead of time.
 
 ## Usage
 
@@ -169,7 +172,7 @@ The server exposes three tools, all read-only:
 
 | Tool | Purpose | Main arguments |
 | --- | --- | --- |
-| `search_legal_skills` | Finds skills by keyword, by meaning, or both | `query`; optional `preset` (`method` or `french-general`), `jurisdiction`, `language`, `practice`, `tag`; `limit` from 1 to 25 (default 8); `mode`: `hybrid` (default), `keyword` or `semantic` |
+| `search_legal_skills` | Finds skills by keyword, by meaning, or both | `query`; optional `preset` (`method` or `french-general`), `jurisdiction`, `language`, `practice`, `tag`; `limit` from 1 to 25 (default 8); `mode`: `keyword` (default), `hybrid` or `semantic` |
 | `get_legal_skill` | Returns the full `SKILL.md`, up to 200,000 characters, and the list of supporting files | `id`, as returned by a search |
 | `list_legal_facets` | Counts skills per language, jurisdiction, practice and tag | Optional filters |
 
@@ -210,7 +213,7 @@ Across all six queries tested, hybrid mode never lowered the first result and im
 
 ### Method search in any language
 
-With the `method` preset, a question about method finds method skills whatever language it is written in. Each query below was run with `"preset": "method"` and the default hybrid mode.
+With the `method` preset, a question about method finds method skills whatever language it is written in. Each query below was run with `"preset": "method"` and `"mode": "hybrid"`.
 
 | Query | Top results |
 | --- | --- |
@@ -218,14 +221,27 @@ With the `method` preset, a question about method finds method skills whatever l
 | "Methode fuer juristische Recherche" | Rechercher le droit applicable (French); German skills on legal methodology |
 | "how to check a legal deliverable before sending it" | Deliverable Fidelity EN; Output scoring - a scorecard before you send |
 
-Measured on Windows 11 with 6 logical processors and the full library:
+Measured on Windows 11 with the full library, in one session:
 
 | Step | Time |
 | --- | --- |
-| Connection, with the cache | About 1.5 s |
-| First search, which loads the model and the vectors | About 20 s |
-| Later searches | About 0.2 s |
-| Cold start without the cache, for example after the library changes | About 90 s |
+| Connection, with the index in place | About 0.6 s |
+| First keyword search | About 2.1 s |
+| First hybrid search, which starts the model and loads the vectors | About 2.2 s |
+| Later searches | About 0.1 to 0.2 s |
+| Building the index, on first start or after the library changes | About 160 s, measured once |
+
+## Memory
+
+The server keeps the index in memory, not the skill texts. Figures are the private memory of each process, measured on Windows 11 with the full library:
+
+| Process | Memory |
+| --- | --- |
+| Server, keyword search | About 110 to 145 MB |
+| Server, after a hybrid or semantic search | About 170 MB |
+| Embedding helper, while the model runs | About 480 MB |
+
+The helper exits after a minute without semantic searches, and the server then returns to its keyword figure. The start command passes `--max-semi-space-size=1` to Node. Without that option, V8 kept roughly 120 MB of heap reserved after indexing, and the server measured about 285 MB.
 
 ## Limitations
 
@@ -234,7 +250,7 @@ Measured on Windows 11 with 6 logical processors and the full library:
 - French is under-represented, with 109 skills. For French questions, start with the language filter (see [Choosing filters](#choosing-filters)).
 - The German query on bank fees stays weak, even in hybrid mode.
 - The glossary is written by hand and does not cover all of law.
-- The first call can exceed a client's 60-second timeout on a busy disk: loading the keyword cache alone took close to 80 seconds once. The index then stays in memory, so a retry is fast.
+- Building the index takes about three minutes on first start or after the library changes. A client with a 60-second timeout may report an error on that first call. The build continues on the server, so a retry works once it is ready.
 - Results are not legal advice, and the project does not guarantee the legal quality of third-party skills.
 
 ## Configuration
@@ -246,6 +262,8 @@ The server reads two optional environment variables:
 | `LEGAL_SKILLS_DIR` | Folder of the skill library | `vendor/legal-skills-open` |
 | `LEGAL_SKILLS_DATA` | Folder of the indexes | `data/` |
 
+The start command, in `package.json` and `.mcp.json`, passes `--max-semi-space-size=1` to Node. See [Memory](#memory).
+
 ## Development
 
 The server is written in TypeScript. Its main dependencies are `@modelcontextprotocol/sdk`, `@huggingface/transformers`, `yaml` and `zod`.
@@ -255,6 +273,7 @@ The server is written in TypeScript. Its main dependencies are `@modelcontextpro
 | `npm run build` | Compiles the TypeScript sources into `dist/` |
 | `npm run typecheck` | Checks types without writing files |
 | `npm test` | Builds, then runs the tests with the Node.js test runner |
+| `npm run build:index` | Builds, then builds the keyword index |
 | `npm run build:embeddings` | Builds, then computes the vector index |
 | `npm start` | Starts the server over stdio |
 
@@ -263,12 +282,15 @@ Project layout:
 ```text
 src/index.ts             stdio entry point
 src/server.ts            the three tools
-src/catalog.ts           loading, indexing, cache, facets
-src/search.ts            BM25 ranking
+src/store.ts             SQLite index: keyword ranking, facets, skill reads
+src/catalog.ts           finding, indexing and fingerprinting SKILL.md files
 src/glossary.ts          cross-language concepts
 src/text.ts              tokenisation
 src/semantic.ts          vectors, similarity, interleaving
-src/embedder.ts          the transformers.js model
+src/embedder.ts          the transformers.js model, and the helper process that runs it
+src/embed-protocol.ts    requests and replies between the server and the helper
+src/embed-worker.ts      the helper process
+src/build-index.ts       builds the keyword index
 src/build-embeddings.ts  builds the vector index
 src/labels.ts            language names
 ```
@@ -279,7 +301,7 @@ To run the tests:
 npm test
 ```
 
-The 71 automated tests cover indexing, search, the glossary, the cache, the MCP protocol, the stdio entry point, hybrid search and filter presets. They also use the real library when the submodule is present.
+The 75 automated tests cover indexing, the SQLite index and its rebuilds, the glossary, the MCP protocol, the stdio entry point, hybrid search, the embedding helper and filter presets. They also use the real library when the submodule is present.
 
 ## Security and privacy
 
@@ -295,6 +317,7 @@ The 71 automated tests cover indexing, search, the glossary, the cache, the MCP 
 Ideas for later versions, open to discussion:
 
 - Try a larger multilingual embedding model, or one trained on legal text, to reduce off-topic results.
+- Reduce the helper's memory, which is the largest part of the footprint while semantic search runs.
 - Extend the glossary beyond its 19 concepts, starting with weak topics such as bank fees.
 - Build a larger set of test queries with expected results, so that ranking changes can be measured.
 - Propose tags for untagged skills to legal-skills-open, so that the tag filter covers more of the library.

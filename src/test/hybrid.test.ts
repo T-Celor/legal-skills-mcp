@@ -5,9 +5,9 @@ import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { loadCatalog } from '../catalog.js';
+import { MEMORY, openOrBuildStore } from '../store.js';
 import { createServer } from '../server.js';
-import { embedCatalog, writeVectorIndex } from '../semantic.js';
+import { embedSkills, writeVectorIndex } from '../semantic.js';
 import { createFixtureLibrary, type FixtureLibrary } from './fixtures.js';
 import { hashingEmbedder } from './hashing-embedder.js';
 
@@ -48,10 +48,11 @@ describe('hybrid search over the protocol', () => {
 
   before(async () => {
     fixture = await createFixtureLibrary();
-    const catalog = await loadCatalog(fixture.root);
+    const store = await openOrBuildStore(fixture.root, MEMORY);
     const embedder = hashingEmbedder();
     dataDir = await mkdtemp(path.join(os.tmpdir(), 'legal-skills-hybrid-'));
-    await writeVectorIndex(dataDir, await embedCatalog(catalog, embedder, { batchSize: 4 }));
+    await writeVectorIndex(dataDir, await embedSkills(store.allSkills(), embedder, { batchSize: 4 }));
+    store.close();
 
     const indexed = createServer(fixture.root, { dataDir, embedder });
     withIndex = { server: indexed, client: await connect(indexed) };
@@ -68,8 +69,15 @@ describe('hybrid search over the protocol', () => {
     await fixture.cleanup();
   });
 
-  it('uses hybrid search by default and says which mode ran', async () => {
+  it('uses keyword search by default and says which mode ran', async () => {
     const { payload } = await search(withIndex.client, { query: 'NDA confidentialité' });
+    assert.equal(payload.mode_used, 'keyword');
+    assert.equal(payload.note, undefined);
+    assert.equal(payload.results?.[0]?.id, 'fr/contracts/skills/revue-nda');
+  });
+
+  it('hybrid mode alternates keyword and meaning matches', async () => {
+    const { payload } = await search(withIndex.client, { query: 'NDA confidentialité', mode: 'hybrid' });
     assert.equal(payload.mode_used, 'hybrid');
     assert.equal(payload.note, undefined);
     assert.equal(payload.results?.[0]?.id, 'fr/contracts/skills/revue-nda');
@@ -93,7 +101,7 @@ describe('hybrid search over the protocol', () => {
   });
 
   it('falls back to keyword search with a note when the index is missing', async () => {
-    const { payload } = await search(withoutIndex.client, { query: 'NDA confidentialité' });
+    const { payload } = await search(withoutIndex.client, { query: 'NDA confidentialité', mode: 'hybrid' });
     assert.equal(payload.mode_used, 'keyword');
     assert.match(payload.note ?? '', /build:embeddings/);
   });

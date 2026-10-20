@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
-import type { Dirent } from 'node:fs';
-import { lstat, mkdir, open, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { open, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
+import type { Dirent } from 'node:fs';
 import { parse } from 'yaml';
-import { LANGUAGE_NAMES } from './labels.js';
 import { tokenize } from './text.js';
 
 const SKILL_FILE = 'SKILL.md';
@@ -13,14 +12,15 @@ const HEADER_BYTES = 8192;
 const MAX_HEADER_BYTES = 65536;
 /** Body characters kept for indexing. */
 const BODY_CHARS = 6000;
+const MAX_LISTED_FILES = 200;
+const SCAN_BATCH = 64;
+/** Folders listed at once. Listing a whole level at once holds every directory entry in memory. */
+const LIST_BATCH = 32;
+
 /** Maximum SKILL.md text returned by get_legal_skill. */
 export const MAX_CONTENT_CHARS = 200_000;
 /** Bytes read from disk for get_legal_skill. UTF-8 uses at most 4 bytes per character. */
-const MAX_CONTENT_BYTES = MAX_CONTENT_CHARS * 4;
-const MAX_LISTED_FILES = 200;
-const SCAN_BATCH = 64;
-/** Number of tags returned by facets, most frequent first. */
-const TAG_FACET_LIMIT = 60;
+export const MAX_CONTENT_BYTES = MAX_CONTENT_CHARS * 4;
 
 export interface SkillMeta {
   /** Relative folder path, e.g. "de/administrative/skills/01-zulaessigkeit-verwaltungsklage". */
@@ -47,238 +47,36 @@ export interface IndexedSkill {
   length: number;
 }
 
-export interface Catalog {
-  root: string;
-  /** Root with symbolic links resolved. Files must stay inside it to be read. */
-  realRoot: string;
-  skills: Map<string, IndexedSkill>;
-  documentFrequency: Map<string, number>;
-  averageLength: number;
-  skipped: number;
-}
-
-export interface SkillDocument {
-  meta: SkillMeta;
-  content: string;
-  truncated: boolean;
-  files: string[];
-}
-
-export interface FacetFilters {
-  jurisdiction?: string;
-  language?: string;
-  practice?: string;
-  tag?: string;
-}
-
-export interface Facet {
-  code: string;
-  count: number;
-  /** Display name, when one is known (languages only). */
-  label?: string;
-}
-
-export interface Facets {
-  /** Number of skills matching the filters. */
-  total: number;
-  languages: Facet[];
-  jurisdictions: Facet[];
-  /** Practice areas, which are the themes. */
-  practices: Facet[];
-  /** Tags, which give the task type or topic. Only part of the library is tagged. */
-  tags: Facet[];
-}
-
-/**
- * Indexes every `<...>/skills/<slug>/SKILL.md` under `root`.
- * Symbolic links are never followed, so nothing outside `root` can be read.
- */
-export async function loadCatalog(root: string, options: { cacheFile?: string } = {}): Promise<Catalog> {
-  // Throws when the library folder is missing.
-  const realRoot = await realpath(root);
-  const candidates = await findSkillFiles(root);
-  // With a cache file, reuse it when no skill file has changed since it was written.
-  const fingerprint = options.cacheFile ? await fingerprintFiles(root, candidates) : null;
-  if (options.cacheFile && fingerprint) {
-    const cached = await readCatalogCache(options.cacheFile, fingerprint, root, realRoot);
-    if (cached) {
-      return cached;
-    }
-  }
-  const skills = new Map<string, IndexedSkill>();
-  let skipped = 0;
-
-  for (let i = 0; i < candidates.length; i += SCAN_BATCH) {
-    const batch = candidates.slice(i, i + SCAN_BATCH);
-    // One unreadable file must not abort the whole index: count it as skipped.
-    const indexed = await Promise.all(
-      batch.map((file) => indexSkill(root, file).catch(() => null)),
-    );
-    for (const skill of indexed) {
-      if (skill) {
-        skills.set(skill.meta.id, skill);
-      } else {
-        skipped += 1;
-      }
-    }
-  }
-
-  if (skills.size === 0) {
-    throw new Error(
-      `No SKILL.md files found under ${root}. Run "git submodule update --init" in the project.`,
-    );
-  }
-
-  const documentFrequency = new Map<string, number>();
-  let totalLength = 0;
-  for (const skill of skills.values()) {
-    totalLength += skill.length;
-    for (const term of skill.weights.keys()) {
-      documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
-    }
-  }
-
-  const catalog: Catalog = {
-    root,
-    realRoot,
-    skills,
-    documentFrequency,
-    averageLength: totalLength / skills.size,
-    skipped,
-  };
-  if (options.cacheFile && fingerprint) {
-    await writeCatalogCache(options.cacheFile, fingerprint, catalog).catch((error: unknown) => {
-      console.error('[legal-skills] could not write the catalog cache:', error);
-    });
-  }
-  return catalog;
-}
-
-/** True when a skill matches every filter that is set. */
-export function matchesFilters(meta: SkillMeta, filters: FacetFilters): boolean {
-  if (filters.jurisdiction && meta.jurisdiction !== filters.jurisdiction) {
-    return false;
-  }
-  if (filters.language && meta.language !== filters.language) {
-    return false;
-  }
-  if (filters.practice && meta.practice !== filters.practice) {
-    return false;
-  }
-  if (filters.tag && !meta.tags.includes(filters.tag)) {
-    return false;
-  }
-  return true;
-}
-
-/**
- * Reads one skill document, looked up by its id. The id is never used as a path.
- * The file is checked again at read time, because it may have been replaced by a
- * link since it was indexed.
- */
-export async function readSkill(catalog: Catalog, id: string): Promise<SkillDocument | null> {
-  const skill = catalog.skills.get(id);
-  if (!skill) {
-    return null;
-  }
-
-  const info = await lstat(skill.filePath);
-  if (!info.isFile()) {
-    return null;
-  }
-  const realFile = await realpath(skill.filePath);
-  if (!isInside(catalog.realRoot, realFile)) {
-    return null;
-  }
-
-  const { text, size } = await readPrefix(realFile, MAX_CONTENT_BYTES);
-  const files = await listSupportingFiles(path.dirname(realFile));
-
-  return {
-    meta: skill.meta,
-    content: text.slice(0, MAX_CONTENT_CHARS),
-    truncated: size > MAX_CONTENT_BYTES || text.length > MAX_CONTENT_CHARS,
-    files,
-  };
-}
-
-/**
- * Counts skills per language, jurisdiction, practice area (theme) and tag (task type).
- * Counts only include the skills matching the filters, so browsing narrows step by step.
- */
-export function facets(catalog: Catalog, filters: FacetFilters = {}): Facets {
-  const languages = new Map<string, number>();
-  const jurisdictions = new Map<string, number>();
-  const practices = new Map<string, number>();
-  const tags = new Map<string, number>();
-  let total = 0;
-
-  for (const { meta } of catalog.skills.values()) {
-    if (!matchesFilters(meta, filters)) {
-      continue;
-    }
-    total += 1;
-    increment(languages, meta.language);
-    increment(jurisdictions, meta.jurisdiction);
-    increment(practices, meta.practice);
-    for (const tag of meta.tags) {
-      increment(tags, tag);
-    }
-  }
-
-  return {
-    total,
-    languages: toFacets(languages).map(withLanguageName),
-    jurisdictions: toFacets(jurisdictions),
-    practices: toFacets(practices),
-    tags: toFacets(tags).slice(0, TAG_FACET_LIMIT),
-  };
-}
-
-function increment(counts: Map<string, number>, code: string): void {
-  if (code) {
-    counts.set(code, (counts.get(code) ?? 0) + 1);
-  }
-}
-
-function withLanguageName(facet: Facet): Facet {
-  const label = LANGUAGE_NAMES[facet.code];
-  return label ? { ...facet, label } : facet;
-}
-
-function toFacets(counts: Map<string, number>): Facet[] {
-  return [...counts.entries()]
-    .map(([code, count]) => ({ code, count }))
-    .sort((a, b) => b.count - a.count || a.code.localeCompare(b.code));
-}
-
-async function findSkillFiles(root: string): Promise<string[]> {
+/** Every `<...>/skills/<slug>/SKILL.md` under `root`. Symbolic links are never followed. */
+export async function listSkillFiles(root: string): Promise<string[]> {
   const found: string[] = [];
   let level = [root];
 
   while (level.length > 0) {
-    // The folders of one level are listed in parallel: listing folders is slow on Windows.
-    const listings = await Promise.all(level.map(listFolder));
     const next: string[] = [];
-    for (const listing of listings) {
-      if ('error' in listing) {
-        // The root must exist; an unreadable sub-folder is skipped.
-        if (listing.dir === root) {
-          throw listing.error;
-        }
-        continue;
-      }
-      for (const entry of listing.entries) {
-        if (entry.isSymbolicLink()) {
+    // The folders of one level are listed in parallel batches: listing folders is slow on Windows.
+    for (let i = 0; i < level.length; i += LIST_BATCH) {
+      const listings = await Promise.all(level.slice(i, i + LIST_BATCH).map(listFolder));
+      for (const listing of listings) {
+        if ('error' in listing) {
+          // The root must exist; an unreadable sub-folder is skipped.
+          if (listing.dir === root) {
+            throw listing.error;
+          }
           continue;
         }
-        const full = path.join(listing.dir, entry.name);
-        if (entry.isDirectory()) {
-          if (entry.name !== '.git' && entry.name !== 'node_modules') {
-            next.push(full);
+        for (const entry of listing.entries) {
+          if (entry.isSymbolicLink()) {
+            continue;
           }
-        } else if (entry.isFile() && entry.name === SKILL_FILE && isInSkillsFolder(full)) {
-          found.push(full);
+          const full = path.join(listing.dir, entry.name);
+          if (entry.isDirectory()) {
+            if (entry.name !== '.git' && entry.name !== 'node_modules') {
+              next.push(full);
+            }
+          } else if (entry.isFile() && entry.name === SKILL_FILE && isInSkillsFolder(full)) {
+            found.push(full);
+          }
         }
       }
     }
@@ -288,27 +86,8 @@ async function findSkillFiles(root: string): Promise<string[]> {
   return found.sort();
 }
 
-type Listing = { dir: string; entries: Dirent[] } | { dir: string; error: unknown };
-
-async function listFolder(dir: string): Promise<Listing> {
-  try {
-    return { dir, entries: await readdir(dir, { withFileTypes: true }) };
-  } catch (error) {
-    return { dir, error };
-  }
-}
-
-function isInSkillsFolder(file: string): boolean {
-  // .../skills/<slug>/SKILL.md
-  return path.basename(path.dirname(path.dirname(file))) === 'skills';
-}
-
-function isInside(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return relative !== '' && !path.isAbsolute(relative) && relative.split(path.sep)[0] !== '..';
-}
-
-async function indexSkill(root: string, filePath: string): Promise<IndexedSkill | null> {
+/** Reads one skill file. Returns null when it has no usable frontmatter. */
+export async function indexSkillFile(root: string, filePath: string): Promise<IndexedSkill | null> {
   let split = splitFrontmatter((await readPrefix(filePath, HEADER_BYTES)).text);
   if (!split) {
     // The frontmatter may be longer than the first read: try once with a larger prefix.
@@ -357,8 +136,29 @@ async function indexSkill(root: string, filePath: string): Promise<IndexedSkill 
   return { meta, filePath, weights, length };
 }
 
+/**
+ * Fingerprint of the skill files: their paths, sizes and modification times. Any edit
+ * to the library changes it. Returns null when a file cannot be inspected.
+ */
+export async function libraryFingerprint(root: string, files: string[]): Promise<string | null> {
+  const lines: string[] = [];
+  try {
+    for (let i = 0; i < files.length; i += SCAN_BATCH) {
+      const batch = files.slice(i, i + SCAN_BATCH);
+      const infos = await Promise.all(batch.map((file) => stat(file)));
+      batch.forEach((file, index) => {
+        const info = infos[index];
+        lines.push(`${path.relative(root, file)}|${info?.size ?? -1}|${info?.mtimeMs ?? -1}`);
+      });
+    }
+  } catch {
+    return null;
+  }
+  return createHash('sha256').update(lines.join('\n')).digest('hex');
+}
+
 /** Reads at most maxBytes from the start of a file, and reports its full size. */
-async function readPrefix(file: string, maxBytes: number): Promise<{ text: string; size: number }> {
+export async function readPrefix(file: string, maxBytes: number): Promise<{ text: string; size: number }> {
   const handle = await open(file, 'r');
   try {
     const { size } = await handle.stat();
@@ -369,6 +169,62 @@ async function readPrefix(file: string, maxBytes: number): Promise<{ text: strin
   } finally {
     await handle.close();
   }
+}
+
+/** Names of the files next to a skill, excluding SKILL.md itself. */
+export async function listSupportingFiles(skillFolder: string): Promise<string[]> {
+  const files: string[] = [];
+  const pending = [skillFolder];
+
+  while (pending.length > 0 && files.length < MAX_LISTED_FILES) {
+    const dir = pending.shift();
+    if (dir === undefined) {
+      break;
+    }
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(full);
+      } else if (entry.isFile() && !(dir === skillFolder && entry.name === SKILL_FILE)) {
+        files.push(path.relative(skillFolder, full).split(path.sep).join('/'));
+        if (files.length >= MAX_LISTED_FILES) {
+          break;
+        }
+      }
+    }
+  }
+
+  return files.sort();
+}
+
+/** True when `target` is strictly inside `root`. Both paths must already be resolved. */
+export function isInside(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative !== '' && !path.isAbsolute(relative) && relative.split(path.sep)[0] !== '..';
+}
+
+type Listing = { dir: string; entries: Dirent[] } | { dir: string; error: unknown };
+
+async function listFolder(dir: string): Promise<Listing> {
+  try {
+    return { dir, entries: await readdir(dir, { withFileTypes: true }) };
+  } catch (error) {
+    return { dir, error };
+  }
+}
+
+function isInSkillsFolder(file: string): boolean {
+  // .../skills/<slug>/SKILL.md
+  return path.basename(path.dirname(path.dirname(file))) === 'skills';
 }
 
 function splitFrontmatter(header: string): { data: Record<string, unknown>; body: string } | null {
@@ -409,126 +265,4 @@ function asText(value: unknown): string {
 function asList(value: unknown): string[] {
   const items = Array.isArray(value) ? value : [value];
   return items.map(asText).filter((item) => item.length > 0);
-}
-
-async function listSupportingFiles(skillFolder: string): Promise<string[]> {
-  const files: string[] = [];
-  const pending = [skillFolder];
-
-  while (pending.length > 0 && files.length < MAX_LISTED_FILES) {
-    const dir = pending.shift();
-    if (dir === undefined) {
-      break;
-    }
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) {
-        continue;
-      }
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(full);
-      } else if (entry.isFile() && !(dir === skillFolder && entry.name === SKILL_FILE)) {
-        files.push(path.relative(skillFolder, full).split(path.sep).join('/'));
-        if (files.length >= MAX_LISTED_FILES) {
-          break;
-        }
-      }
-    }
-  }
-
-  return files.sort();
-}
-
-/** Bump when the shape of SkillMeta or the index changes, so old caches are ignored. */
-const CACHE_FORMAT = 1;
-
-interface CacheFile {
-  format: number;
-  fingerprint: string;
-  averageLength: number;
-  skipped: number;
-  documentFrequency: Array<[string, number]>;
-  skills: Array<{ meta: SkillMeta; file: string; length: number; weights: Array<[string, number]> }>;
-}
-
-/**
- * Fingerprint of the skill files: their paths, sizes and modification times. Any edit
- * to the library changes it. Returns null when a file cannot be inspected.
- */
-async function fingerprintFiles(root: string, files: string[]): Promise<string | null> {
-  const lines: string[] = [];
-  try {
-    for (let i = 0; i < files.length; i += SCAN_BATCH) {
-      const batch = files.slice(i, i + SCAN_BATCH);
-      const infos = await Promise.all(batch.map((file) => stat(file)));
-      batch.forEach((file, index) => {
-        const info = infos[index];
-        lines.push(`${path.relative(root, file)}|${info?.size ?? -1}|${info?.mtimeMs ?? -1}`);
-      });
-    }
-  } catch {
-    return null;
-  }
-  return createHash('sha256').update(lines.join('\n')).digest('hex');
-}
-
-async function writeCatalogCache(cacheFile: string, fingerprint: string, catalog: Catalog): Promise<void> {
-  const data: CacheFile = {
-    format: CACHE_FORMAT,
-    fingerprint,
-    averageLength: catalog.averageLength,
-    skipped: catalog.skipped,
-    documentFrequency: [...catalog.documentFrequency],
-    skills: [...catalog.skills.values()].map((skill) => ({
-      meta: skill.meta,
-      file: path.relative(catalog.root, skill.filePath).split(path.sep).join('/'),
-      length: skill.length,
-      weights: [...skill.weights],
-    })),
-  };
-  await mkdir(path.dirname(cacheFile), { recursive: true });
-  await writeFile(cacheFile, JSON.stringify(data), 'utf8');
-}
-
-/** Returns the cached catalog, or null when the cache is missing, old, or stale. */
-async function readCatalogCache(
-  cacheFile: string,
-  fingerprint: string,
-  root: string,
-  realRoot: string,
-): Promise<Catalog | null> {
-  let data: CacheFile;
-  try {
-    data = JSON.parse(await readFile(cacheFile, 'utf8')) as CacheFile;
-  } catch {
-    return null;
-  }
-  if (data.format !== CACHE_FORMAT || data.fingerprint !== fingerprint) {
-    return null;
-  }
-
-  const skills = new Map<string, IndexedSkill>();
-  for (const entry of data.skills) {
-    skills.set(entry.meta.id, {
-      meta: entry.meta,
-      filePath: path.join(root, ...entry.file.split('/')),
-      weights: new Map(entry.weights),
-      length: entry.length,
-    });
-  }
-  console.error(`[legal-skills] loaded ${skills.size} skills from the catalog cache`);
-  return {
-    root,
-    realRoot,
-    skills,
-    documentFrequency: new Map(data.documentFrequency),
-    averageLength: data.averageLength,
-    skipped: data.skipped,
-  };
 }

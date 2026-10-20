@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { Catalog, SkillMeta } from './catalog.js';
+import type { SkillMeta } from './catalog.js';
 
 /** Multilingual sentence-embedding model (MIT licence), loaded in 8-bit quantised form. */
 export const EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
@@ -18,6 +18,8 @@ const VECTOR_FILE = 'embeddings.f32';
 export interface Embedder {
   readonly model: string;
   embed(texts: string[], kind: 'query' | 'passage'): Promise<Float32Array[]>;
+  /** Releases what the embedder holds, such as a helper process. */
+  close?(): void;
 }
 
 /** One vector per skill, stored row by row in the order of `ids`. */
@@ -47,25 +49,20 @@ export function skillPassage(meta: SkillMeta): string {
   return `${meta.title}. ${meta.description}${tags}`.slice(0, MAX_PASSAGE_CHARS);
 }
 
-/** Embeds every skill of the catalog, in batches. */
-export async function embedCatalog(
-  catalog: Catalog,
+/** Embeds every skill, in batches. */
+export async function embedSkills(
+  skills: SkillMeta[],
   embedder: Embedder,
   options: { batchSize: number; onProgress?: (done: number, total: number) => void },
 ): Promise<VectorIndex> {
-  const ids = [...catalog.skills.keys()].sort(compareIds);
+  const ordered = [...skills].sort((a, b) => compareIds(a.id, b.id));
+  const ids = ordered.map((meta) => meta.id);
   let dims = 0;
   let vectors = new Float32Array(0);
 
-  for (let start = 0; start < ids.length; start += options.batchSize) {
-    const batch = ids.slice(start, start + options.batchSize);
-    const texts = batch.map((id) => {
-      const skill = catalog.skills.get(id);
-      if (!skill) {
-        throw new Error(`Skill vanished during embedding: ${id}`);
-      }
-      return skillPassage(skill.meta);
-    });
+  for (let start = 0; start < ordered.length; start += options.batchSize) {
+    const batch = ordered.slice(start, start + options.batchSize);
+    const texts = batch.map((meta) => skillPassage(meta));
     const embedded = await embedder.embed(texts, 'passage');
     if (dims === 0) {
       dims = embedded[0]?.length ?? 0;

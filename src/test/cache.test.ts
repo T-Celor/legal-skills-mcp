@@ -1,42 +1,38 @@
 import assert from 'node:assert/strict';
-import { readFile, stat, writeFile, mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { loadCatalog, type Catalog } from '../catalog.js';
+import { openOrBuildStore, STORE_FILE } from '../store.js';
 import { createFixtureLibrary, type FixtureLibrary } from './fixtures.js';
 
 const REVUE = 'fr/contracts/skills/revue-nda';
 
-describe('catalog cache', () => {
+describe('stored index', () => {
   let fixture: FixtureLibrary;
-  let cacheDir: string;
-  let cacheFile: string;
+  let dataDir: string;
+  let storeFile: string;
 
   before(async () => {
     fixture = await createFixtureLibrary();
-    cacheDir = await mkdtemp(path.join(os.tmpdir(), 'legal-skills-cache-'));
-    cacheFile = path.join(cacheDir, 'catalog.json');
+    dataDir = await mkdtemp(path.join(os.tmpdir(), 'legal-skills-store-'));
+    storeFile = path.join(dataDir, STORE_FILE);
   });
 
   after(async () => {
     await fixture.cleanup();
-    await rm(cacheDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true });
   });
 
-  it('writes the cache on the first load and reuses it on the second', async () => {
-    const first = await loadCatalog(fixture.root, { cacheFile });
-    assert.ok((await stat(cacheFile)).size > 0);
+  it('writes the index file and reuses it while no skill file changes', async () => {
+    const first = await openOrBuildStore(fixture.root, storeFile);
+    first.close();
+    const written = (await stat(storeFile)).mtimeMs;
 
-    const second = await loadCatalog(fixture.root, { cacheFile });
-    assert.deepEqual([...second.skills.keys()].sort(), [...first.skills.keys()].sort());
-    assert.equal(second.averageLength, first.averageLength);
-    assert.equal(second.skipped, first.skipped);
-    assert.deepEqual(second.skills.get(REVUE)?.meta, first.skills.get(REVUE)?.meta);
-    assert.deepEqual(
-      [...(second.skills.get(REVUE)?.weights ?? [])],
-      [...(first.skills.get(REVUE)?.weights ?? [])],
-    );
+    const second = await openOrBuildStore(fixture.root, storeFile);
+    assert.equal(second.get(REVUE)?.title, 'Revue de NDA');
+    second.close();
+    assert.equal((await stat(storeFile)).mtimeMs, written);
   });
 
   it('rebuilds the index when a skill file changes', async () => {
@@ -44,8 +40,9 @@ describe('catalog cache', () => {
     const original = await readFile(file, 'utf8');
     try {
       await writeFile(file, original.replace('Revue de NDA', 'Revue de NDA modifiée'), 'utf8');
-      const changed: Catalog = await loadCatalog(fixture.root, { cacheFile });
-      assert.equal(changed.skills.get(REVUE)?.meta.title, 'Revue de NDA modifiée');
+      const changed = await openOrBuildStore(fixture.root, storeFile);
+      assert.equal(changed.get(REVUE)?.title, 'Revue de NDA modifiée');
+      changed.close();
     } finally {
       await writeFile(file, original, 'utf8');
     }

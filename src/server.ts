@@ -3,16 +3,6 @@ import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import {
-  facets,
-  loadCatalog,
-  matchesFilters,
-  readSkill,
-  type Catalog,
-  type Facet,
-  type FacetFilters,
-} from './catalog.js';
-import { searchCatalog, type SearchHit } from './search.js';
-import {
   CANDIDATES,
   interleaveRankings,
   readVectorIndex,
@@ -21,6 +11,15 @@ import {
   type Scored,
   type VectorIndex,
 } from './semantic.js';
+import {
+  MEMORY,
+  openOrBuildStore,
+  STORE_FILE,
+  type Facet,
+  type FacetFilters,
+  type SearchHit,
+  type SkillStore,
+} from './store.js';
 
 export const SERVER_VERSION = '0.3.0';
 
@@ -46,7 +45,7 @@ const PRESETS: Record<string, FacetFilters> = {
 };
 
 export interface ServerOptions {
-  /** Folder with the vector index from build:embeddings. Without it, only keyword search runs. */
+  /** Folder with the index files. Without it, the keyword index lives in memory and only keyword search runs. */
   dataDir?: string;
   /** Turns queries into vectors. Needed for semantic and hybrid search. */
   embedder?: Embedder;
@@ -99,42 +98,43 @@ function cleanFacet(facet: Facet): Facet {
 }
 
 /**
- * Builds the MCP server. The library is indexed as soon as the server starts, so the
- * first search does not pay for the whole scan. The semantic index is loaded on first use.
+ * Builds the MCP server. The index is opened as soon as the server starts, so the first
+ * search does not pay for it. The semantic index and the model are loaded on first use.
  */
 export function createServer(root: string, options: ServerOptions = {}): McpServer {
-  // The keyword index is cached next to the semantic index, so restarts are fast.
-  const catalogCacheFile = options.dataDir ? path.join(options.dataDir, 'catalog.json') : undefined;
-  let catalogPromise: Promise<Catalog> | undefined;
-  const getCatalog = (): Promise<Catalog> => {
-    catalogPromise ??= loadCatalog(root, { cacheFile: catalogCacheFile }).then(
-      (catalog) => {
+  const storeFile = options.dataDir ? path.join(options.dataDir, STORE_FILE) : MEMORY;
+  let store: SkillStore | undefined;
+  let storePromise: Promise<SkillStore> | undefined;
+  const getStore = (): Promise<SkillStore> => {
+    storePromise ??= openOrBuildStore(root, storeFile).then(
+      (opened) => {
+        store = opened;
         console.error(
-          `[legal-skills] indexed ${catalog.skills.size} skills from ${root} (${catalog.skipped} skipped)`,
+          `[legal-skills] indexed ${opened.size} skills from ${root} (${opened.skipped} skipped)`,
         );
-        return catalog;
+        return opened;
       },
       (error: unknown) => {
         // Allow a retry on the next call instead of caching the failure.
-        catalogPromise = undefined;
+        storePromise = undefined;
         throw error;
       },
     );
-    return catalogPromise;
+    return storePromise;
   };
-  getCatalog().catch((error: unknown) => {
+  getStore().catch((error: unknown) => {
     console.error('[legal-skills] indexing failed, will retry on the next call:', error);
   });
 
   let vectorsPromise: Promise<VectorIndex | null> | undefined;
-  const getVectors = (catalog: Catalog): Promise<VectorIndex | null> => {
+  const getVectors = (store: SkillStore): Promise<VectorIndex | null> => {
     const { dataDir, embedder } = options;
     if (!dataDir || !embedder) {
       return Promise.resolve(null);
     }
     vectorsPromise ??= readVectorIndex(dataDir, {
       model: embedder.model,
-      ids: [...catalog.skills.keys()],
+      ids: store.idList(),
     }).then((index) => {
       console.error(
         index
@@ -153,49 +153,57 @@ export function createServer(root: string, options: ServerOptions = {}): McpServ
     filters: FacetFilters,
     mode: SearchMode,
   ): Promise<SearchOutcome | null> => {
-    const catalog = await getCatalog();
+    const store = await getStore();
     if (mode === 'keyword') {
-      return { modeUsed: 'keyword', hits: searchCatalog(catalog, query, limit, filters) };
+      return { modeUsed: 'keyword', hits: store.search(query, limit, filters) };
     }
 
-    const vectors = await getVectors(catalog);
+    const vectors = await getVectors(store);
     if (!vectors || !options.embedder) {
       if (mode === 'semantic') {
         return null;
       }
-      return { modeUsed: 'keyword', hits: searchCatalog(catalog, query, limit, filters), note: NO_INDEX_NOTE };
+      return { modeUsed: 'keyword', hits: store.search(query, limit, filters), note: NO_INDEX_NOTE };
     }
 
     const [queryVector] = await options.embedder.embed([query], 'query');
     if (!queryVector) {
       return null;
     }
-    const allowed = (id: string): boolean => {
-      const skill = catalog.skills.get(id);
-      return skill !== undefined && matchesFilters(skill.meta, filters);
-    };
+    const allowedIds = store.allowedIds(filters);
+    const allowed = (id: string): boolean => allowedIds === null || allowedIds.has(id);
     const semantic = topBySimilarity(vectors, queryVector, CANDIDATES, allowed);
 
     if (mode === 'semantic') {
-      return { modeUsed: 'semantic', hits: toHits(catalog, semantic.slice(0, limit)) };
+      return { modeUsed: 'semantic', hits: toHits(store, semantic.slice(0, limit)) };
     }
     // Hybrid: alternate the best keyword matches with the best meaning matches.
-    const lexical = searchCatalog(catalog, query, CANDIDATES, filters).map((hit) => hit.meta.id);
+    const lexical = store.search(query, CANDIDATES, filters).map((hit) => hit.meta.id);
     const merged = interleaveRankings([lexical, semantic.map((hit) => hit.id)], limit);
     const hits = merged.map((id, position) => ({ id, score: 1 / (position + 1) }));
-    return { modeUsed: 'hybrid', hits: toHits(catalog, hits) };
+    return { modeUsed: 'hybrid', hits: toHits(store, hits) };
   };
 
   const server = new McpServer({ name: 'legal-skills', version: SERVER_VERSION });
+
+  // Release the index file when the connection closes, so that it can be removed or rebuilt.
+  const previousOnClose = server.server.onclose;
+  server.server.onclose = () => {
+    previousOnClose?.();
+    store?.close();
+    store = undefined;
+    options.embedder?.close?.();
+  };
 
   server.registerTool(
     'search_legal_skills',
     {
       title: 'Search legal skills',
       description:
-        'Ranked search over the legal-skills-open library (about 20,000 skills). The default "hybrid" mode alternates ' +
-        'the best exact-keyword matches with the best meaning matches, so a plain-language description finds relevant skills in any language. ' +
-        'Terms in French, English, German and other languages are also matched through a glossary of legal concepts. ' +
+        'Ranked search over the legal-skills-open library (about 20,000 skills). Keyword mode, the default, matches exact terms, ' +
+        'and terms in French, English, German and other languages are also matched through a glossary of legal concepts. ' +
+        'Use mode "hybrid" when the wording of a question may differ from the skills: it also ranks by meaning, so a plain-language ' +
+        'description finds relevant skills in any language. Hybrid starts an embedding model in a helper process, which stops after about a minute without searches. ' +
         'Use list_legal_facets first to see the languages, themes (practice areas) and tags. ' +
         'Preset "method" searches method and workflow skills (practice "general") in every language and jurisdiction. ' +
         'Scores are only comparable within one answer. Results are reference material, not legal advice.',
@@ -214,8 +222,8 @@ export function createServer(root: string, options: ServerOptions = {}): McpServ
         limit: z.number().int().min(1).max(25).default(8),
         mode: z
           .enum(['hybrid', 'keyword', 'semantic'])
-          .default('hybrid')
-          .describe('hybrid (default) alternates keyword and meaning matches; keyword matches exact terms; semantic uses meaning only'),
+          .default('keyword')
+          .describe('keyword (default) matches exact terms; hybrid alternates keyword and meaning matches; semantic uses meaning only'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -282,8 +290,8 @@ export function createServer(root: string, options: ServerOptions = {}): McpServ
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ id }) => {
-      const catalog = await getCatalog();
-      const document = await readSkill(catalog, id);
+      const store = await getStore();
+      const document = await store.readSkill(id);
       if (!document) {
         return errorResult(`Unknown skill id: ${id}. Use search_legal_skills to find valid ids.`);
       }
@@ -345,8 +353,8 @@ export function createServer(root: string, options: ServerOptions = {}): McpServ
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ jurisdiction, language, practice, tag }) => {
-      const catalog = await getCatalog();
-      const result = facets(catalog, { jurisdiction, language, practice, tag });
+      const store = await getStore();
+      const result = store.facets({ jurisdiction, language, practice, tag });
       return jsonResult({
         filters: {
           jurisdiction: jurisdiction ?? null,
@@ -366,11 +374,11 @@ export function createServer(root: string, options: ServerOptions = {}): McpServ
   return server;
 }
 
-/** Turns scored ids into hits, skipping ids that are not in the catalog. */
-function toHits(catalog: Catalog, scored: Scored[]): SearchHit[] {
+/** Turns scored ids into hits, skipping ids that are not in the index. */
+function toHits(store: SkillStore, scored: Scored[]): SearchHit[] {
   const hits: SearchHit[] = [];
   for (const { id, score } of scored) {
-    const meta = catalog.skills.get(id)?.meta;
+    const meta = store.get(id);
     if (meta) {
       hits.push({ meta, score });
     }

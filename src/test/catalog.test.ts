@@ -3,24 +3,26 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { facets, loadCatalog, MAX_CONTENT_CHARS, readSkill, type Catalog } from '../catalog.js';
+import { MAX_CONTENT_CHARS } from '../catalog.js';
+import { MEMORY, openOrBuildStore, type SkillStore } from '../store.js';
 import { createFixtureLibrary, type FixtureLibrary } from './fixtures.js';
 
-describe('loadCatalog', () => {
+describe('skill store', () => {
   let fixture: FixtureLibrary;
-  let catalog: Catalog;
+  let store: SkillStore;
 
   before(async () => {
     fixture = await createFixtureLibrary();
-    catalog = await loadCatalog(fixture.root);
+    store = await openOrBuildStore(fixture.root, MEMORY);
   });
 
   after(async () => {
+    store.close();
     await fixture.cleanup();
   });
 
   it('indexes only SKILL.md files inside a skills folder with valid frontmatter', () => {
-    assert.deepEqual([...catalog.skills.keys()].sort(), [
+    assert.deepEqual(store.idList().sort(), [
       'cn/contracts/skills/baomi-xieyi',
       'de/employment/skills/kuendigung-pruefen',
       'de/general/skills/long-frontmatter',
@@ -33,7 +35,7 @@ describe('loadCatalog', () => {
       'us/litigation/skills/motion-to-dismiss',
     ]);
     // Only the file without frontmatter is rejected. The fr/notes file is not in a skills folder.
-    assert.equal(catalog.skipped, 1);
+    assert.equal(store.skipped, 1);
   });
 
   it('does not follow links that point outside the library', (t) => {
@@ -41,11 +43,11 @@ describe('loadCatalog', () => {
       t.skip('junctions are not available on this platform');
       return;
     }
-    assert.equal([...catalog.skills.keys()].some((id) => id.includes('leak')), false);
+    assert.equal(store.idList().some((id) => id.includes('leak')), false);
   });
 
   it('reads frontmatter metadata, including tags', () => {
-    const meta = catalog.skills.get('fr/contracts/skills/revue-nda')?.meta;
+    const meta = store.get('fr/contracts/skills/revue-nda');
     assert.ok(meta);
     assert.equal(meta.title, 'Revue de NDA');
     assert.equal(meta.jurisdiction, 'fr');
@@ -57,7 +59,7 @@ describe('loadCatalog', () => {
   });
 
   it('keeps version strings as written, including CRLF files with a byte order mark', () => {
-    const meta = catalog.skills.get('fr/contracts/skills/crlf-bom')?.meta;
+    const meta = store.get('fr/contracts/skills/crlf-bom');
     assert.ok(meta);
     assert.equal(meta.name, '007-contrat-type');
     assert.equal(meta.title, 'Modèle de contrat');
@@ -65,16 +67,16 @@ describe('loadCatalog', () => {
   });
 
   it('indexes frontmatter longer than the first read', () => {
-    assert.ok(catalog.skills.has('de/general/skills/long-frontmatter'));
+    assert.ok(store.get('de/general/skills/long-frontmatter'));
   });
 
   it('treats an empty jurisdiction as missing', () => {
-    assert.equal(catalog.skills.get('us/general/skills/no-jurisdiction')?.meta.jurisdiction, '');
-    assert.equal(facets(catalog).jurisdictions.some((facet) => facet.code === ''), false);
+    assert.equal(store.get('us/general/skills/no-jurisdiction')?.jurisdiction, '');
+    assert.equal(store.facets().jurisdictions.some((facet) => facet.code === ''), false);
   });
 
   it('returns a skill body and lists supporting files without SKILL.md', async () => {
-    const doc = await readSkill(catalog, 'fr/contracts/skills/revue-nda');
+    const doc = await store.readSkill('fr/contracts/skills/revue-nda');
     assert.ok(doc);
     assert.match(doc.content, /# Revue de NDA/);
     assert.equal(doc.truncated, false);
@@ -82,20 +84,20 @@ describe('loadCatalog', () => {
   });
 
   it('truncates very large skills to the limit', async () => {
-    const doc = await readSkill(catalog, 'us/general/skills/huge-skill');
+    const doc = await store.readSkill('us/general/skills/huge-skill');
     assert.ok(doc);
     assert.equal(doc.truncated, true);
     assert.equal(doc.content.length, MAX_CONTENT_CHARS);
   });
 
   it('refuses ids that are not indexed, including traversal attempts', async () => {
-    assert.equal(await readSkill(catalog, '../../etc/passwd'), null);
-    assert.equal(await readSkill(catalog, '..\\..\\secret'), null);
-    assert.equal(await readSkill(catalog, 'linked/secret/skills/leak'), null);
+    assert.equal(await store.readSkill('../../etc/passwd'), null);
+    assert.equal(await store.readSkill('..\\..\\secret'), null);
+    assert.equal(await store.readSkill('linked/secret/skills/leak'), null);
   });
 
   it('counts skills per facet, and narrows the counts when filters are given', () => {
-    const all = facets(catalog);
+    const all = store.facets();
     assert.equal(all.total, 10);
     assert.deepEqual(all.jurisdictions, [
       { code: 'fr', count: 3 },
@@ -129,7 +131,7 @@ describe('loadCatalog', () => {
       { code: 'letter', count: 1 },
     ]);
 
-    const french = facets(catalog, { language: 'fr' });
+    const french = store.facets({ language: 'fr' });
     assert.equal(french.total, 3);
     assert.deepEqual(french.jurisdictions, [{ code: 'fr', count: 3 }]);
     assert.deepEqual(french.practices, [{ code: 'contracts', count: 3 }]);
@@ -140,11 +142,11 @@ describe('loadCatalog', () => {
   });
 });
 
-describe('loadCatalog on an empty folder', () => {
+describe('skill store on an empty folder', () => {
   it('fails with a clear message', async () => {
     const empty = await mkdtemp(path.join(os.tmpdir(), 'legal-skills-empty-'));
     try {
-      await assert.rejects(loadCatalog(empty), /No SKILL\.md files found/);
+      await assert.rejects(openOrBuildStore(empty, MEMORY), /No SKILL\.md files found/);
     } finally {
       await rm(empty, { recursive: true, force: true });
     }
