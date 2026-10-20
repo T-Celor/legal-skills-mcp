@@ -39,7 +39,7 @@ La recherche par sens utilise [Xenova/multilingual-e5-small](https://huggingface
 ## Installation
 
 ```bash
-git clone --recurse-submodules <url-du-depot>
+git clone --recurse-submodules https://github.com/T-Celor/legal-skills-mcp.git
 cd legal-skills-mcp
 npm install
 npm run build
