@@ -1,0 +1,31 @@
+{
+  "name": "legal-skills-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that searches the ThomasMoreAI legal-skills-open library (SKILL.md files).",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "legal-skills-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test \"dist/test/**/*.test.js\""
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@cfworker/json-schema": "4.1.1",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "yaml": "2.9.1",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "typescript": "5.9.3"
+  }
+}

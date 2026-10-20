@@ -1,0 +1,4 @@
+[submodule "vendor/legal-skills-open"]
+	path = vendor/legal-skills-open
+	url = https://github.com/ThomasMoreAI/legal-skills-open
+	shallow = true
