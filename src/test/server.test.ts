@@ -67,6 +67,7 @@ describe('MCP server over the protocol', () => {
     const blocks = textBlocks(result);
     const metadata = JSON.parse(blocks[0]?.text ?? '{}') as { supporting_files: string[] };
     assert.deepEqual(metadata.supporting_files, ['scripts/run.py']);
+    assert.match(blocks[1]?.text ?? '', /^<untrusted-skill-content id="[0-9a-f-]+" source="legal-skills-open">/);
     assert.match(blocks[1]?.text ?? '', /# Revue de NDA/);
   });
 
@@ -102,6 +103,21 @@ describe('MCP server over the protocol', () => {
     const payload = JSON.parse(textBlocks(result)[0]?.text ?? '{}') as {
       practices: Array<{ code: string; count: number }>;
     };
-    assert.deepEqual(payload.practices, [{ code: 'employment', count: 1 }]);
+    assert.deepEqual(payload.practices, [
+      { code: 'employment', count: 1 },
+      { code: 'general', count: 1 },
+    ]);
+  });
+
+  it('strips invisible tag characters from returned text', async () => {
+    const result = await client.callTool({
+      name: 'search_legal_skills',
+      arguments: { query: 'invisibles' },
+    });
+    const payload = JSON.parse(textBlocks(result)[0]?.text ?? '{}') as {
+      results: Array<{ id: string; description: string }>;
+    };
+    assert.equal(payload.results[0]?.id, 'fr/contracts/skills/tag-chars');
+    assert.equal(payload.results[0]?.description.includes(String.fromCodePoint(0xe0041)), false);
   });
 });
